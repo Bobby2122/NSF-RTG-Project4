@@ -1,0 +1,16 @@
+Target,m,Clusters,Inflection pts,Clusters ≤ Inflections?,Final MSE
+sin(2πx) + 0.5·sin(4πx),20,6,7,True,0.15093
+sin(2πx) + 0.5·sin(4πx),50,12,7,False,0.07531
+sin(2πx) + 0.5·sin(4πx),100,18,7,False,0.04643
+sin(2πx),20,7,3,False,0.12346
+sin(2πx),50,9,3,False,0.03689
+sin(2πx),100,26,3,False,0.01442
+sin(2πx) + sin(6πx),20,8,11,True,0.55464
+sin(2πx) + sin(6πx),50,13,11,False,0.45297
+sin(2πx) + sin(6πx),100,14,11,False,0.38698
+x³ − x,20,20,1,False,0.00072
+x³ − x,50,33,1,False,0.00038
+x³ − x,100,43,1,False,0.00026
+|x|,20,16,1203,True,0.00039
+|x|,50,29,1203,True,0.00075
+|x|,100,43,1203,True,0.00124
