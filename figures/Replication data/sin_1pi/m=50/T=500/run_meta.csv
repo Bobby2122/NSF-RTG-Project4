@@ -1,0 +1,2 @@
+target,m,T,k_true,n_clusters,n_active,loss,max_da,max_db,active_leq_k
+sin_1pi,50,500,1,31,48,3.663856697092031e-05,0.00038908612357854705,0.00022464045613613498,0
