@@ -1,4 +1,4 @@
-# Project 4: Bias Collapse in Shallow ReLU Networks — 1–2 Week Plan
+# Project 4: Bias Collapse in Shallow ReLU Networks
 
 **Goal:** Numerically reproduce the bias collapse phenomenon, develop mathematical intuition for the open problems, and produce a written report with findings (and ideally partial proofs).
 
