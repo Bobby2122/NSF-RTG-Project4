@@ -22,15 +22,15 @@ safely pruned to k neurons with a provable error bound.
 
 **Conjecture from the slides:**
 
-$$\lim_{m \to \infty} C(m, f^*) = \#\{x \in [-1,1] : (f^*)''(x) = 0 \text{ and changes sign}\}$$
+$$\lim_{m \to \infty} C(m, f^\ast) = \#\{x \in [-1,1] : (f^\ast)''(x) = 0 \text{ and changes sign}\}$$
 
 The slides list three specific goals for this open problem:
 
 | Specific Goal | Description | Status in This Project |
 |---|---|---|
 | 4.1.1 | Prove C(m, f*) ≤ Cmax(f*) independent of m | Numerically supported via simulate scripts and instability_test.py; not proven |
-| 4.1.2 | Is convergence to clusters finite-time or asymptotic? | Not explicitly addressed; data implies asymptotic (C decreases gradually with T) but no dedicated experiment |
-| 4.1.3 | Does the count depend on curvature amplitude or only the sign pattern of f''? | Not addressed; would require comparing targets with identical inflection locations but different curvature magnitudes |
+| 4.1.2 | Is convergence to clusters finite-time or asymptotic? | Data implies asymptotic (C decreases gradually with T) but no dedicated experiment (not yet explicitly addressed) |
+| 4.1.3 | Does the count depend on curvature amplitude or only the sign pattern of f''? | Not addressed yet; would require comparing targets with identical inflection locations but different curvature magnitudes |
 
 ### Open Problem 4.3: Provable Pruning
 
