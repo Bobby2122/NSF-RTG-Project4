@@ -1,0 +1,11 @@
+# LaTeX build artifacts
+*.aux
+*.log
+*.nav
+*.out
+*.snm
+*.toc
+
+# Python cache
+__pycache__/
+*.pyc
