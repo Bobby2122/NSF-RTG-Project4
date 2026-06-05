@@ -28,7 +28,7 @@ The slides list three specific goals for this open problem:
 
 | Specific Goal | Description | Status in This Project |
 |---|---|---|
-| 4.1.1 | Prove C(m, f*) ≤ Cmax(f*) independent of m | Numerically supported via simulate scripts and instability_test.py; not proven |
+| 4.1.1 | Prove C(m, f*) ≤ Cmax(f*) independent of m | Numerically supported via simulate scripts and instability_test.py; experiment in process |
 | 4.1.2 | Is convergence to clusters finite-time or asymptotic? | Data implies asymptotic (C decreases gradually with T) but no dedicated experiment (not yet explicitly addressed) |
 | 4.1.3 | Does the count depend on curvature amplitude or only the sign pattern of f''? | Not addressed yet; would require comparing targets with identical inflection locations but different curvature magnitudes |
 
