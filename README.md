@@ -299,14 +299,20 @@ $$\mathcal{L} = \frac{1}{2}\int_{-1}^{1}(f(x) - f^\ast(x))^2\,dx$$
 
 ### Gradient flow ODEs
 
-$$\dot{a}_j = -\int_{-1}^{1}(f - f^\ast)\,\sigma(x - b_j)\,dx \qquad \dot{b}_j = a_j \int_{b_j}^{1}(f - f^\ast)\,dx$$
+The dot notation denotes time derivatives. The two ODEs govern how each amplitude and bias evolve over time:
+
+$$\frac{da_j}{dt} = \dot{a}_j = -\int_{-1}^{1}(f - f^\ast)\,\sigma(x - b_j)\,dx$$
+
+$$\frac{db_j}{dt} = \dot{b}_j = a_j \int_{b_j}^{1}(f - f^\ast)\,dx$$
+
+At each moment in time t, the right-hand sides are spatial integrals over x from -1 to 1 (or b_j to 1) that measure how misaligned the current network output f is from the target f*. These integrals determine the direction and speed at which each parameter moves. The ODE solver advances all 2m parameters simultaneously from t=0 to t=T.
 
 ### Variable Definitions
 
 | Variable | What it is | Role in the experiment |
 |---|---|---|
 | m | Network width: the number of neurons in the hidden layer | Primary controlled variable. The conjecture is a statement about m going to infinity, so we test many values of m to observe the convergence trend. |
-| T | Integration time of the gradient flow ODE solver. Not wall-clock time, not training epochs. It is the continuous time variable t in the ODEs above, integrated from 0 to T. | Controls how long the simulation runs. Larger T gives the biases more time to collapse. Too small a T means the system has not converged yet. Chosen large enough that the cluster structure stabilizes. |
+| T | The upper time limit of the gradient flow simulation. The ODEs define instantaneous velocities da/dt and db/dt using spatial integrals over x from -1 to 1 (those integrals compute how much each neuron should move at a given moment). T is completely separate: it is how far forward in time t we let those velocities evolve the parameters, solving the system from t=0 to t=T. Not wall-clock time, not training epochs. | Controls how long gradient flow runs. Larger T gives the biases more time to collapse and merge. Too small a T means the system is still mid-collapse and has not yet revealed its final cluster structure. |
 | b_j | Bias parameter of neuron j. Determines where on the domain that neuron places its kink. | The quantity being studied. The collapse of b_j values into clusters is the central phenomenon. |
 | a_j | Amplitude (weight) of neuron j. Determines the size of the slope change at the kink. | Evolves jointly with b_j under the gradient flow. The sum of amplitudes in each cluster gives the effective weight of that kink in the pruned network. |
 | f* | The target function being approximated. | Determines k, the number of inflection points, which is the conjectured limit of the cluster count. Different target functions give different k values and test the conjecture across different complexity levels. |
