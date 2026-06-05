@@ -55,13 +55,25 @@ Numerically confirm that C(m, f*) converges toward k as m grows, and that
 this convergence stabilizes independently of how large m gets once past a
 threshold. Addressed by **simulate.py** and **simulate_parallel.py**.
 
-### Goal 2: Show k+1 Cluster Configurations Are Unstable (4.1.1)
+### Goal 2: Show Configurations Near k Are Unstable Above k and Attracted to k (4.1.1)
 
-Show numerically that if you inject an extra cluster into a converged
-k-cluster solution, gradient flow drives the system back to k clusters rather
-than maintaining the k+1 configuration. Addressed by **instability_test.py**.
-This supports 4.1.1 by providing evidence that C cannot remain above k once
-m is large enough.
+Test the stability of configurations where the cluster count is within a
+threshold of k. Three run categories are tested, with threshold = 2:
+
+**exact_k** (C == k): inject one extra neuron artificially to create C+1.
+Test whether gradient flow dissolves it back to k. Two injection strategies:
+near (just outside an existing cluster) and isolated (farthest point from all clusters).
+
+**above_k** (k < C <= k+2): the simulation itself produced more clusters than k.
+Continue integrating without any injection and test whether the natural excess
+dissolves toward k on its own.
+
+**below_k** (k-2 <= C < k): fewer clusters than k, an over-merged state.
+Inject one neuron and test whether the under-complete configuration accepts it
+and moves toward k, or rejects it.
+
+Addressed by **instability_test.py**. Supports 4.1.1 by building evidence
+that k acts as an attractor for the cluster count from both sides.
 
 ### Goal 3: Verify Stationary Point Conditions (4.1 conjecture support)
 
@@ -257,10 +269,12 @@ the amplitude decays even when there is no nearby cluster to merge with.
 time units, amplitude of the injected neuron (does it decay toward zero?),
 and the total cluster count C(t) (does it drop from k+1 back to k?).
 
-**Qualifying runs from current data:** 10 runs across sin(pi x) k=1,
-sin(3pi x) k=5, and sin(4pi x) k=7. More data is necessary.
+**Qualifying runs from current data:** 20 runs across all three categories:
+10 exact_k, 3 above_k, and 7 below_k. More will qualify once
+simulate_parallel.py completes and more runs converge near k.
 
-**Outputs per run:** goal2_near.png, goal2_isolated.png
+**Outputs per run:** goal2_near.png (injection), goal2_isolated.png (injection),
+goal2_natural.png (natural dissolution, above_k runs only)
 
 **Global outputs:** goal2_results.csv, goal2_summary.png (heatmap of which
 runs returned to k, and bar chart of return rate by injection type)
@@ -273,19 +287,33 @@ runs returned to k, and bar chart of return rate by injection type)
 
 **Note:** Only simulate.py has finished running as of 6/5/2026 10:20 CST. verify_pruning.py has been run with the results from simulate.py. simulate_parallel.py is currently running. instability_test.py has not yet been run as more data is required from simulate_parallel.py.
 
-## Model
+## Model and Controlled Variables
 
-**Network:**
+### Network
 
 $$f(x) = \sum_{j=1}^{m} a_j \, \sigma(x - b_j), \quad \sigma(z) = \max(0, z), \quad x \in [-1, 1]$$
 
-**Training via gradient flow on continuous MSE loss:**
+### Training via gradient flow on continuous MSE loss
 
 $$\mathcal{L} = \frac{1}{2}\int_{-1}^{1}(f(x) - f^\ast(x))^2\,dx$$
 
-**Gradient flow ODEs:**
+### Gradient flow ODEs
 
 $$\dot{a}_j = -\int_{-1}^{1}(f - f^\ast)\,\sigma(x - b_j)\,dx \qquad \dot{b}_j = a_j \int_{b_j}^{1}(f - f^\ast)\,dx$$
+
+### Variable Definitions
+
+| Variable | What it is | Role in the experiment |
+|---|---|---|
+| m | Network width: the number of neurons in the hidden layer | Primary controlled variable. The conjecture is a statement about m going to infinity, so we test many values of m to observe the convergence trend. |
+| T | Integration time of the gradient flow ODE solver. Not wall-clock time, not training epochs. It is the continuous time variable t in the ODEs above, integrated from 0 to T. | Controls how long the simulation runs. Larger T gives the biases more time to collapse. Too small a T means the system has not converged yet. Chosen large enough that the cluster structure stabilizes. |
+| b_j | Bias parameter of neuron j. Determines where on the domain that neuron places its kink. | The quantity being studied. The collapse of b_j values into clusters is the central phenomenon. |
+| a_j | Amplitude (weight) of neuron j. Determines the size of the slope change at the kink. | Evolves jointly with b_j under the gradient flow. The sum of amplitudes in each cluster gives the effective weight of that kink in the pruned network. |
+| f* | The target function being approximated. | Determines k, the number of inflection points, which is the conjectured limit of the cluster count. Different target functions give different k values and test the conjecture across different complexity levels. |
+| k | The number of sign-changing zeros of (f*)'' in (-1, 1). This is the number of inflection points of the target. | The conjectured limit of C(m, f*) as m goes to infinity. The central quantity the experiments are designed to track. |
+| C(m, f*) | The number of distinct bias clusters observed at the end of the simulation for a given m and target. | The output being measured. We track how C changes as m increases across many runs, looking for convergence toward k. |
+| delta | Maximum intra-cluster diameter: the largest spread of b_j values within any single cluster. | Used in the Open Problem 4.3 pruning bound. Measures how tightly the biases have merged. Smaller delta means the clusters are more compact. |
+| T_PERTURB | In instability_test.py only: the additional integration time run after injecting a neuron or starting from a near-k state. Separate from T above. | Controls how long the perturbation test runs. Should be long enough to observe whether the perturbed state dissolves toward k. |
 
 ---
 
