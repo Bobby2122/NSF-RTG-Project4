@@ -271,7 +271,7 @@ runs returned to k, and bar chart of return rate by injection type)
 
 ---
 
-**Note:** Only simulate.py has finished running as of 6/5/2026 10:20 CST. verify_pruning.py has been run with the data from that experiment. simulate_parallel.py is still running. instability_test.py has not yet been run as more data is required from simulate_parallel.py.
+**Note:** Only simulate.py has finished running as of 6/5/2026 10:20 CST. verify_pruning.py has been run with the results from simulate.py. simulate_parallel.py is currently running. instability_test.py has not yet been run as more data is required from simulate_parallel.py.
 
 ## Model
 
