@@ -1,4 +1,4 @@
-# NSF RTG: Project 4: Bias Collapse in Shallow ReLU Networks
+# NSF RTG Project 4: Bias Collapse in Shallow ReLU Networks
 
 ## Overview
 
