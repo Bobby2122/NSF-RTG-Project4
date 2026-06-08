@@ -78,10 +78,13 @@ for target_key in os.listdir(FIG_BASE):
                 continue
             with open(meta_file, newline='') as f:
                 row = next(csv.DictReader(f))
+            T_val = int(row['T'])
+            if T_val < 5000:
+                continue   # skip low-T runs — insufficient for convergence
             rows.append({
                 'target':     target_key,
                 'm':          int(row['m']),
-                'T':          int(row['T']),
+                'T':          T_val,
                 'k_true':     int(row['k_true']),
                 'n_clusters': int(row['n_clusters']),
             })

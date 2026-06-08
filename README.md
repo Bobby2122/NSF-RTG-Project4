@@ -191,16 +191,29 @@ ode_verification.png, convergence_check.csv, run_meta.csv
 **Open problems addressed:** 4.1 (main conjecture), 4.1.1 (partial), Goal 3
 
 **Purpose:** Extends the baseline to T=5000 and T=10000, and adds three new targets with
-k=9, 11, and 13 to test the conjecture at higher complexity.
+k=9, 11, and 13 to test the conjecture at higher complexity. Low-T runs (T=200,500,1000
+from simulate.py) are excluded from the convergence plot: they do not produce reliable
+convergence evidence and only inflate runtime.
 
 **Targets and parameters:**
 
 | Targets | m values | T values |
 |---|---|---|
-| All 6 from simulate.py | 50, 100, 250, 500 | 5000, 10000 |
-| sin(5pi x) k=9 | 1000, 1500, 2000, 3000, 5000 | |
+| All 6 from simulate.py | 50, 100, 250, 500, 1000 | 5000, 10000 |
+| sin(5pi x) k=9 | | |
 | sin(6pi x) k=11 | | |
 | sin(7pi x) k=13 | | |
+
+m values above 1000 (1500, 2000, 3000, 5000) were removed: a single run at m=1000,
+T=5000 takes approximately 21.5 hours on a laptop, and larger m values scale roughly as
+O(m² × T). The convergence trend is clearly visible by m=1000.
+
+**Speed optimization:** N_QUAD reduced from 400 to 200. The quadrature grid evaluates
+spatial integrals at every ODE step; halving its size gives approximately 1.9x speedup
+with no change to cluster counts at m ≥ 100.
+
+**Convergence plot:** uses T=5000 and T=10000 only. Low-T rows from run_summary.csv are
+loaded but not plotted; they can be re-enabled if needed.
 
 **Outputs per run:** same four files as simulate.py, plus run_meta.csv
 
@@ -327,6 +340,18 @@ tick marks rather than all m individual bias dots.
 
 ---
 
+### plot_convergence_now.py: Live Convergence Plot
+
+**Purpose:** Generates a convergence plot from whatever run_meta.csv files currently exist
+on disk. Safe to run at any point while simulate_parallel.py is still running. Only
+includes T=5000 and T=10000 runs; low-T data is filtered out.
+
+**Output:** figures/Replication data/convergence_plot_current.png
+
+**Run with:** `python plot_convergence_now.py`
+
+---
+
 ## Run Order
 
 ```
@@ -439,7 +464,10 @@ For sin(nπx): the second derivative has exactly 2n−1 sign-changing zeros in (
 
 ---
 
-**Note on current run status (as of 6/5/2026 10:20 am CST):** simulate.py has finished.
+**Note on current run status (as of 6/7/2026):** simulate.py has finished.
 verify_pruning.py has been run on simulate.py results (108 runs confirmed). simulate_parallel.py
-is currently running. instability_test.py has not yet been run pending more data from
+has been running since 6/5 and is being restarted with optimized settings: N_QUAD=200
+(1.9x speedup) and m values capped at 1000 (removes multi-day large-m jobs). 30 of 90
+jobs are already complete and will be skipped on restart. The new targets sin_5pi, sin_6pi,
+sin_7pi have not yet run. instability_test.py has not yet been run pending more data from
 simulate_parallel.py. collapse_v2.py has been run and results are fully analyzed.

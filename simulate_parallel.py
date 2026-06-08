@@ -149,8 +149,9 @@ def get_inflection_locations(target_key):
 # Sweep parameters
 # =============================================================================
 
-M_VALUES_ALL = [50, 100, 250, 500, 1000, 1500, 2000, 3000, 5000]
-T_VALUES_ALL = [5000, 10000]   # only long runs — lower T gave no convergence evidence
+M_VALUES_ALL = [50, 100, 250, 500, 1000]  # base sweep for all targets
+EXTENDED_M   = [1500, 2500]              # Phase 2 only — added for targets that don't converge at m=1000
+T_VALUES_ALL = [5000, 10000]             # only long runs — lower T gave no convergence evidence
 
 N_SAVE           = 300
 SEED             = 42
@@ -452,86 +453,141 @@ def make_convergence_plot(summary_rows, out_path=None):
 if __name__ == '__main__':
     os.makedirs(FIG_BASE, exist_ok=True)
 
-    # ── Build job list ─────────────────────────────────────────────────────────
-    # All T values here are new (5000, 10000 were never run by simulate.py),
-    # so no old-combo filtering needed — skip logic lives inside run_one via
-    # run_meta.csv for Ctrl+C safety only.
-    jobs = [(t, m, T)
-            for t in TARGETS
-            for m in M_VALUES_ALL
-            for T in T_VALUES_ALL]
-
-    # ── Load simulate.py rows (read-only) for the combined convergence plot ───
+    # ── Load simulate.py rows (read-only) for reference ──────────────────────
     def load_csv(path):
         rows = []
         if os.path.exists(path):
             with open(path, newline='') as f:
                 for row in csv.DictReader(f):
                     rows.append({
-                        'target': row['target'],
-                        'm':      int(row['m']),
-                        'T':      int(row['T']),
-                        'k_true': int(row['k_true']),
-                        'n_clusters': int(row['n_clusters']),
-                        'n_active':   int(row['n_active']),
-                        'loss':       float(row['loss']),
-                        'max_da':     float(row['max_da']),
-                        'max_db':     float(row['max_db']),
+                        'target':       row['target'],
+                        'm':            int(row['m']),
+                        'T':            int(row['T']),
+                        'k_true':       int(row['k_true']),
+                        'n_clusters':   int(row['n_clusters']),
+                        'n_active':     int(row['n_active']),
+                        'loss':         float(row['loss']),
+                        'max_da':       float(row['max_da']),
+                        'max_db':       float(row['max_db']),
                         'active_leq_k': int(row['active_leq_k']),
                     })
         return rows
 
-    orig_rows     = load_csv(ORIG_SUMMARY_CSV)    # simulate.py rows — never written to
-    existing_rows = load_csv(SUMMARY_CSV)         # previous parallel runs (T=5000,10000 only)
+    orig_rows     = load_csv(ORIG_SUMMARY_CSV)   # simulate.py rows — never written to
+    existing_rows = load_csv(SUMMARY_CSV)        # previous parallel runs
 
     n_workers = max(1, cpu_count() - 2)
 
+    # ── Helper: run a batch of jobs and return results + counts ───────────────
+    def run_phase(jobs_list, phase_label):
+        """Submit jobs_list to the pool and return (rows, n_skipped, n_completed)."""
+        phase_rows      = []
+        phase_skipped   = 0
+        phase_completed = 0
+        print(f'\n{"=" * 72}')
+        print(phase_label)
+        print(f'{"=" * 72}')
+        with Pool(processes=n_workers) as pool:
+            for result in pool.imap_unordered(run_one, jobs_list):
+                if result is None:
+                    phase_skipped += 1
+                    continue
+                was_skipped = result.pop('_skipped', False)
+                elapsed     = result.pop('_elapsed', None)
+                phase_rows.append(result)
+                tag = (f'{result["target"]:<12}  m={result["m"]:<5}  T={result["T"]:<6}  '
+                       f'clusters={result["n_clusters"]:<4}  k={result["k_true"]}  '
+                       f'C=k: {result["n_clusters"] == result["k_true"]}  '
+                       f'loss={result["loss"]:.3e}  '
+                       f'max|db|={result["max_db"]:.2e}')
+                if was_skipped:
+                    phase_skipped += 1
+                    print(f'  SKIP (meta)  {tag}')
+                else:
+                    phase_completed += 1
+                    t_str = f'  [{elapsed:.0f}s]' if elapsed else ''
+                    print(f'  DONE{t_str}  {tag}')
+        return phase_rows, phase_skipped, phase_completed
+
+    # ── Phase 1: base m sweep, sorted by (m, T, target) ──────────────────────
+    # All targets run at m=50 before any target runs at m=100, etc.
+    # Within the same m, T=5000 runs before T=10000.
+    # This guarantees data on every target even if the run is stopped early.
+    base_jobs = sorted(
+        [(t, m, T) for t in TARGETS for m in M_VALUES_ALL for T in T_VALUES_ALL],
+        key=lambda x: (x[1], x[2], x[0])   # (m, T, target_name)
+    )
+
     print('=' * 72)
     print('simulate_parallel.py — Open Problem 4.1')
-    print(f'Targets  : {list(TARGETS.keys())}')
-    print(f'm values : {M_VALUES_ALL}')
-    print(f'T values : {T_VALUES_ALL}')
-    print(f'Jobs     : {len(jobs)}')
-    print(f'Workers  : {n_workers}  (of {cpu_count()} logical CPUs)')
+    print(f'Targets      : {list(TARGETS.keys())}')
+    print(f'Base m       : {M_VALUES_ALL}')
+    print(f'Extended m   : {EXTENDED_M}  (Phase 2, non-converged targets only)')
+    print(f'T values     : {T_VALUES_ALL}')
+    print(f'Phase 1 jobs : {len(base_jobs)}')
+    print(f'Workers      : {n_workers}  (of {cpu_count()} logical CPUs)')
     print(f'simulate.py rows (plot only) : {len(orig_rows)}')
     print(f'Previous parallel rows       : {len(existing_rows)}')
     print(f'Summary  -> {SUMMARY_CSV}')
     print(f'Plot     -> {CONV_PLOT}')
     print('=' * 72)
 
-    # ── Run in parallel ────────────────────────────────────────────────────────
-    new_rows  = []
+    t_start   = time.time()
+    all_new   = []   # accumulates results from both phases
     skipped   = 0
     completed = 0
-    t_start   = time.time()
 
-    with Pool(processes=n_workers) as pool:
-        for result in pool.imap_unordered(run_one, jobs):
-            if result is None:
-                skipped += 1
-                continue
+    p1_rows, p1_skip, p1_done = run_phase(base_jobs, 'Phase 1 — base m sweep (all targets)')
+    all_new.extend(p1_rows)
+    skipped   += p1_skip
+    completed += p1_done
 
-            was_skipped = result.pop('_skipped', False)
-            elapsed     = result.pop('_elapsed', None)
-            new_rows.append(result)
+    # ── Dynamic convergence check at max(M_VALUES_ALL) ────────────────────────
+    # A target is converged if n_clusters == k_true for at least one T value
+    # at the highest base m. Non-converged targets proceed to Phase 2.
+    MAX_BASE_M   = max(M_VALUES_ALL)
+    all_results  = {(r['target'], r['m'], r['T']): r for r in existing_rows}
+    for r in all_new:
+        all_results[(r['target'], r['m'], r['T'])] = r
 
-            tag = (f'{result["target"]:<12}  m={result["m"]:<5}  T={result["T"]:<6}  '
-                   f'clusters={result["n_clusters"]:<4}  k={result["k_true"]}  '
-                   f'C=k: {result["n_clusters"]==result["k_true"]}  '
-                   f'loss={result["loss"]:.3e}  '
-                   f'max|db|={result["max_db"]:.2e}')
+    non_converged = []
+    print(f'\n── Convergence check at m={MAX_BASE_M} {"─" * 40}')
+    for t_key, (_, k_true, _) in TARGETS.items():
+        at_max_m = [v for (t, m, T), v in all_results.items()
+                    if t == t_key and m == MAX_BASE_M]
+        if not at_max_m:
+            print(f'  {t_key:<12}  k={k_true}  NO DATA — queuing Phase 2')
+            non_converged.append(t_key)
+        elif any(r['n_clusters'] == k_true for r in at_max_m):
+            best = min(abs(r['n_clusters'] - k_true) for r in at_max_m)
+            print(f'  {t_key:<12}  k={k_true}  CONVERGED  (min |C-k| = {best})')
+        else:
+            diffs = [abs(r['n_clusters'] - k_true) for r in at_max_m]
+            print(f'  {t_key:<12}  k={k_true}  NOT CONVERGED  (min |C-k| = {min(diffs)}) — queuing Phase 2')
+            non_converged.append(t_key)
 
-            if was_skipped:
-                skipped += 1
-                print(f'  SKIP (meta)  {tag}')
-            else:
-                completed += 1
-                t_str = f'  [{elapsed:.0f}s]' if elapsed else ''
-                print(f'  DONE{t_str}  {tag}')
+    # ── Phase 2: extended m for non-converged targets only ────────────────────
+    if non_converged:
+        ext_jobs = sorted(
+            [(t, m, T) for t in non_converged for m in EXTENDED_M for T in T_VALUES_ALL],
+            key=lambda x: (x[1], x[2], x[0])
+        )
+        print(f'\nPhase 2 targets : {non_converged}')
+        print(f'Phase 2 m values: {EXTENDED_M}')
+        print(f'Phase 2 jobs    : {len(ext_jobs)}')
+        p2_rows, p2_skip, p2_done = run_phase(
+            ext_jobs,
+            f'Phase 2 — extended m {EXTENDED_M} for non-converged targets'
+        )
+        all_new.extend(p2_rows)
+        skipped   += p2_skip
+        completed += p2_done
+    else:
+        print('\nAll targets converged at base m — Phase 2 not needed.')
 
-    # ── Write run_summary_parallel.csv (parallel runs only) ───────────────────
+    # ── Write run_summary_parallel.csv ────────────────────────────────────────
     parallel_rows = {(r['target'], r['m'], r['T']): r for r in existing_rows}
-    for r in new_rows:
+    for r in all_new:
         parallel_rows[(r['target'], r['m'], r['T'])] = r
     parallel_rows = sorted(parallel_rows.values(),
                            key=lambda r: (r['target'], r['m'], r['T']))
@@ -543,18 +599,13 @@ if __name__ == '__main__':
             writer.writerow({k: r[k] for k in META_FIELDS})
     print(f'\nParallel summary -> {SUMMARY_CSV}  ({len(parallel_rows)} rows)')
 
-    # ── Convergence plot — all T values combined for full picture ─────────────
-    # orig_rows: T=200,500,1000 for existing targets (from simulate.py, read-only)
-    # parallel_rows: T=5000,10000 for all targets
-    # new targets (sin_5pi/6pi/7pi) only appear in parallel_rows — that's fine
-    combined = {(r['target'], r['m'], r['T']): r for r in orig_rows}
-    for r in parallel_rows:
-        combined[(r['target'], r['m'], r['T'])] = r
-    combined = sorted(combined.values(), key=lambda r: (r['target'], r['m'], r['T']))
-
+    # ── Convergence plot — high-T runs only (T=5000, 10000) ──────────────────
+    # Low-T data (simulate.py) excluded — insufficient for convergence conclusions.
+    # orig_rows kept in memory in case caller wants to re-enable combined plot.
+    combined = sorted(parallel_rows.values(), key=lambda r: (r['target'], r['m'], r['T']))
     if combined:
         make_convergence_plot(combined, out_path=CONV_PLOT)
 
     wall = time.time() - t_start
     print(f'\nDone.  {completed} new runs,  {skipped} skipped,  '
-          f'wall time {wall/60:.1f} min')
+          f'wall time {wall / 60:.1f} min')
