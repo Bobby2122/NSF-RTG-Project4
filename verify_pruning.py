@@ -11,10 +11,14 @@ where f is the converged network, f_tilde is the pruned network obtained by
 replacing each cluster with a single neuron at the cluster centroid with the
 summed amplitude.
 
-Run this script AFTER simulate.py and/or simulate_parallel.py have completed.
-It scans every run folder under 'figures/Replication data/' for a
-convergence_check.csv (which contains the final b_j and a_j values) and a
-run_meta.csv (which contains the run metadata). No re-simulation is needed.
+Run this script AFTER simulate.py / simulate_parallel.py OR simulate_discrete.py
+have completed. It scans every run folder under the selected figures directory for
+convergence_check.csv and run_meta.csv. No re-simulation is needed.
+
+Mode switch
+-----------
+  Set MODE = "flow"     to verify ODE flow results   (figures/Replication data/)
+  Set MODE = "discrete" to verify discrete GD results (figures/Discrete GD/)
 
 What this script does per run
 ------------------------------
@@ -35,7 +39,7 @@ Outputs
   Per run (in each existing run folder):
       pruning_verification.png  -- full vs pruned vs target, pointwise error, bound check
 
-  Global (in figures/Replication data/):
+  Global (in the selected figures directory):
       pruning_bound_results.csv -- one row per run, all metrics
       pruning_bound_summary.png -- scatter and trend plots across all runs
 
@@ -50,6 +54,28 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import os, csv, time
 from multiprocessing import Pool, cpu_count
+
+# =============================================================================
+# ── Mode switch ───────────────────────────────────────────────────────────────
+# "flow"             → ODE results in figures/Replication data/
+# "discrete"         → constant-lr GD in figures/Discrete GD/
+# "discrete_scaled"  → scaled-lr GD in figures/Discrete GD Scaled/
+# =============================================================================
+MODE = "discrete"
+# "flow"     → ODE results in figures/Replication data/
+# "discrete" → GD results  in figures/Discrete GD/
+
+if MODE == "flow":
+    FIG_BASE   = os.path.join('figures', 'Replication data')
+    TIME_FIELD = 'T'        # field name in run_meta.csv
+    TIME_LABEL = 'T'        # used in figure titles and print output
+else:
+    FIG_BASE   = os.path.join('figures', 'Discrete GD')
+    TIME_FIELD = 'steps'
+    TIME_LABEL = 'steps'
+
+RESULTS_CSV = os.path.join(FIG_BASE, 'pruning_bound_results.csv')
+SUMMARY_PNG = os.path.join(FIG_BASE, 'pruning_bound_summary.png')
 
 # =============================================================================
 # Quadrature grid  (must match main scripts)
@@ -72,10 +98,6 @@ TARGETS = {
     'sin_6pi': (r'$\sin(6\pi x)$',    11, lambda x: np.sin(6 * np.pi * x)),
     'sin_7pi': (r'$\sin(7\pi x)$',    13, lambda x: np.sin(7 * np.pi * x)),
 }
-
-FIG_BASE    = os.path.join('figures', 'Replication data')
-RESULTS_CSV = os.path.join(FIG_BASE, 'pruning_bound_results.csv')
-SUMMARY_PNG = os.path.join(FIG_BASE, 'pruning_bound_summary.png')
 
 CLUSTER_TOL = 0.02   # same tolerance used in simulate.py / simulate_parallel.py
 
@@ -154,6 +176,7 @@ def load_run(run_dir):
     """
     Returns dict with keys: target, m, T, k_true, n_clusters, b, a
     or None if required files are missing.
+    The 'T' key stores ODE end-time (flow mode) or step count (discrete mode).
     """
     f_csv  = os.path.join(run_dir, 'convergence_check.csv')
     f_meta = os.path.join(run_dir, 'run_meta.csv')
@@ -174,7 +197,7 @@ def load_run(run_dir):
     return {
         'target':     meta['target'],
         'm':          int(meta['m']),
-        'T':          int(meta['T']),
+        'T':          int(meta[TIME_FIELD]),   # T or steps depending on mode
         'k_true':     int(meta['k_true']),
         'n_clusters': int(meta['n_clusters']),
         'b':          np.array(b_vals),
@@ -233,7 +256,7 @@ def verify_one(run_dir, run_data):
         fig, axes = plt.subplots(1, 3, figsize=(15, 4))
         fig.suptitle(
             f'Open Problem 4.3 — Pruning Bound Verification\n'
-            f'target={target_label},  m={m},  T={T}  |  '
+            f'target={target_label},  m={m},  {TIME_LABEL}={T}  |  '
             f'clusters={n_clusters},  k={k_true}',
             fontsize=11)
 
@@ -415,7 +438,8 @@ if __name__ == '__main__':
                     run_dirs.append(t_path)
 
     run_dirs.sort()
-    print(f'Found {len(run_dirs)} run folders under {FIG_BASE}')
+    print(f'Mode: {MODE}  →  {FIG_BASE}')
+    print(f'Found {len(run_dirs)} run folders')
 
     # ── Load existing results to support restart ───────────────────────────────
     existing = {}
@@ -438,7 +462,7 @@ if __name__ == '__main__':
         out_fig = os.path.join(run_dir, 'pruning_verification.png')
         if key in existing and os.path.exists(out_fig):
             skip_count += 1
-            print(f'  SKIP  {run_data["target"]:<12}  m={run_data["m"]:<5}  T={run_data["T"]}')
+            print(f'  SKIP  {run_data["target"]:<12}  m={run_data["m"]:<5}  {TIME_LABEL}={run_data["T"]}')
         else:
             jobs.append((run_dir, run_data))
 
@@ -457,7 +481,7 @@ if __name__ == '__main__':
             all_results[key] = result
             new_count += 1
             status = 'HOLDS' if result['bound_holds'] else '*** VIOLATED ***'
-            print(f'  DONE  {result["target"]:<12}  m={result["m"]:<5}  T={result["T"]:<6}  '
+            print(f'  DONE  {result["target"]:<12}  m={result["m"]:<5}  {TIME_LABEL}={result["T"]:<6}  '
                   f'actual={float(result["actual_error"]):.3e}  '
                   f'bound={float(result["bound"]):.3e}  '
                   f'tight={result["tightness"]}  '

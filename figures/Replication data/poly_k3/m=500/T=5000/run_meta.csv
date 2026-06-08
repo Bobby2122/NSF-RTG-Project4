@@ -1,0 +1,2 @@
+target,m,T,k_true,n_clusters,n_active,loss,max_da,max_db,active_leq_k
+poly_k3,500,5000,3,20,138,3.726545328929025e-07,0.0011209327891103635,0.0003243483011702923,0

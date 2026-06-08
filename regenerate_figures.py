@@ -4,17 +4,20 @@ regenerate_figures.py
 Post-processing script that regenerates a clean center-panel figure
 for every completed run folder.
 
-The original slide93_reproduction.png plots ALL m bias dots at y=0,
-which is cluttered when m is large. This script creates a new figure
-'final_fit_clean.png' in each run folder that shows only the k cluster
-center locations as vertical tick marks, making the figure readable.
+The original bias_trajectories.png / slide93_reproduction.png may plot all m
+bias dots which is cluttered for large m. This script creates a new figure
+'final_fit_clean.png' in each run folder that shows only the cluster center
+locations as vertical tick marks, making the figure readable.
 
-The left panel (bias trajectories) and right panel (loss curve) are NOT
-regenerated here because the raw trajectory data is not saved to disk.
-This script only needs convergence_check.csv and run_meta.csv, which
-are written for every completed run.
+This script only needs convergence_check.csv and run_meta.csv, which are
+written for every completed run.
 
-Run after simulate.py and/or simulate_parallel.py:
+Mode switch
+-----------
+  Set MODE = "flow"     → reads from figures/Replication data/  (ODE results)
+  Set MODE = "discrete" → reads from figures/Discrete GD/        (GD results)
+
+Run after the relevant simulation script:
     python regenerate_figures.py
 """
 
@@ -26,12 +29,29 @@ from matplotlib.lines import Line2D
 import os, csv
 
 # =============================================================================
+# ── Mode switch ───────────────────────────────────────────────────────────────
+# "flow"     → ODE results   in figures/Replication data/
+# "discrete" → GD results    in figures/Discrete GD/
+# =============================================================================
+MODE = "discrete"
+# "flow"     → ODE results in figures/Replication data/
+# "discrete" → GD results  in figures/Discrete GD/
+
+if MODE == "flow":
+    FIG_BASE   = os.path.join('figures', 'Replication data')
+    TIME_FIELD = 'T'
+    TIME_LABEL = 'T'
+else:
+    FIG_BASE   = os.path.join('figures', 'Discrete GD')
+    TIME_FIELD = 'steps'
+    TIME_LABEL = 'steps'
+
+# =============================================================================
 # Constants — must match the simulation scripts
 # =============================================================================
 N_QUAD      = 400
 X_QUAD      = np.linspace(-1.0, 1.0, N_QUAD)
 CLUSTER_TOL = 0.02
-FIG_BASE    = os.path.join('figures', 'Replication data')
 
 # =============================================================================
 # Target functions
@@ -89,7 +109,7 @@ def load_run(run_dir):
     return {
         'target':     meta['target'],
         'm':          int(meta['m']),
-        'T':          int(meta['T']),
+        'T':          int(meta[TIME_FIELD]),   # T or steps depending on mode
         'k_true':     int(meta['k_true']),
         'n_clusters': int(meta['n_clusters']),
         'b':          np.array(b_vals),
@@ -130,7 +150,7 @@ def make_clean_figure(run_dir, run_data):
 
     fig, ax = plt.subplots(figsize=(7, 4))
     fig.suptitle(
-        f'target = {target_label},   $m = {m}$,   $T = {T}$\n'
+        f'target = {target_label},   $m = {m}$,   ${TIME_LABEL} = {T}$\n'
         f'clusters = {n_clusters},   $k = {k_true}$,   '
         f'$C = k$: {n_clusters == k_true}',
         fontsize=11)
@@ -169,6 +189,7 @@ def make_clean_figure(run_dir, run_data):
 if __name__ == '__main__':
     done = 0
     skipped = 0
+    print(f'Mode: {MODE}  →  {FIG_BASE}')
 
     for target_key in os.listdir(FIG_BASE):
         target_path = os.path.join(FIG_BASE, target_key)
@@ -189,7 +210,7 @@ if __name__ == '__main__':
                 if created:
                     done += 1
                     print(f'  DONE  {run_data["target"]:<12}  '
-                          f'm={run_data["m"]:<5}  T={run_data["T"]}')
+                          f'm={run_data["m"]:<5}  {TIME_LABEL}={run_data["T"]}')
                 else:
                     skipped += 1
 

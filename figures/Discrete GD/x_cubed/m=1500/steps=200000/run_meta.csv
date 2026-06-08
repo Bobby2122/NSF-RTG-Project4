@@ -1,0 +1,2 @@
+target,m,steps,lr_eff,k_true,n_clusters,n_active,loss,max_da_grad,max_db_grad,active_leq_k
+x_cubed,1500,200000,0.00018257418583505537,1,7,1284,0.00016859127363718206,0.0003078405644203896,0.0010835905008660255,0
