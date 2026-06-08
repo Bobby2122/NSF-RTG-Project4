@@ -149,9 +149,12 @@ def get_inflection_locations(target_key):
 # Sweep parameters
 # =============================================================================
 
-M_VALUES_ALL = [50, 100, 250, 500, 1000]  # base sweep for all targets
-EXTENDED_M   = [1500, 2500]              # Phase 2 only — added for targets that don't converge at m=1000
-T_VALUES_ALL = [5000, 10000]             # only long runs — lower T gave no convergence evidence
+M_VALUES_ALL       = [50, 100, 250, 500, 1000]  # base sweep — all targets
+PHASE2_M_FIXED     = [1500, 2500]              # Phase 2 always starts with these two m values
+PHASE2_M_INCREMENT = 500                       # increment after 2500 (options: 500, 1000, 2500)
+PHASE2_M_MAX       = 5000                      # Phase 2 hard cap — stops here even if not converged
+CONV_THRESHOLD     = 1                         # |C - k| <= this counts as converged
+T_VALUES_ALL       = [5000, 10000]             # only long runs — lower T gave no convergence evidence
 
 N_SAVE           = 300
 SEED             = 42
@@ -550,15 +553,16 @@ if __name__ == '__main__':
     for r in all_new:
         all_results[(r['target'], r['m'], r['T'])] = r
 
+    # ── Phase 1 → Phase 2 convergence check (|C-k| <= CONV_THRESHOLD) ──────────
     non_converged = []
-    print(f'\n── Convergence check at m={MAX_BASE_M} {"─" * 40}')
+    print(f'\n── Convergence check at m={MAX_BASE_M}  (threshold |C-k| <= {CONV_THRESHOLD}) {"─"*20}')
     for t_key, (_, k_true, _) in TARGETS.items():
         at_max_m = [v for (t, m, T), v in all_results.items()
                     if t == t_key and m == MAX_BASE_M]
         if not at_max_m:
             print(f'  {t_key:<12}  k={k_true}  NO DATA — queuing Phase 2')
             non_converged.append(t_key)
-        elif any(r['n_clusters'] == k_true for r in at_max_m):
+        elif any(abs(r['n_clusters'] - k_true) <= CONV_THRESHOLD for r in at_max_m):
             best = min(abs(r['n_clusters'] - k_true) for r in at_max_m)
             print(f'  {t_key:<12}  k={k_true}  CONVERGED  (min |C-k| = {best})')
         else:
@@ -566,22 +570,93 @@ if __name__ == '__main__':
             print(f'  {t_key:<12}  k={k_true}  NOT CONVERGED  (min |C-k| = {min(diffs)}) — queuing Phase 2')
             non_converged.append(t_key)
 
-    # ── Phase 2: extended m for non-converged targets only ────────────────────
+    # ── Phase 2: loop with per-target early stopping ──────────────────────────
+    # Builds m sequence from PHASE2_M_FIXED then increments by PHASE2_M_INCREMENT
+    # up to PHASE2_M_MAX (hard stop). Each target exits after 2 consecutive
+    # m values both satisfying |C-k| <= CONV_THRESHOLD (filters transients).
     if non_converged:
-        ext_jobs = sorted(
-            [(t, m, T) for t in non_converged for m in EXTENDED_M for T in T_VALUES_ALL],
-            key=lambda x: (x[1], x[2], x[0])
-        )
-        print(f'\nPhase 2 targets : {non_converged}')
-        print(f'Phase 2 m values: {EXTENDED_M}')
-        print(f'Phase 2 jobs    : {len(ext_jobs)}')
-        p2_rows, p2_skip, p2_done = run_phase(
-            ext_jobs,
-            f'Phase 2 — extended m {EXTENDED_M} for non-converged targets'
-        )
-        all_new.extend(p2_rows)
-        skipped   += p2_skip
-        completed += p2_done
+        phase2_m_seq = list(PHASE2_M_FIXED)
+        _m = max(PHASE2_M_FIXED)
+        while _m < PHASE2_M_MAX:
+            _m = min(_m + PHASE2_M_INCREMENT, PHASE2_M_MAX)
+            if _m not in phase2_m_seq:
+                phase2_m_seq.append(_m)
+
+        print(f'\nPhase 2 targets      : {non_converged}')
+        print(f'Phase 2 m sequence   : {phase2_m_seq}')
+        print(f'Convergence rule     : |C-k| <= {CONV_THRESHOLD} for 2 consecutive m values')
+        print(f'Hard stop            : m = {PHASE2_M_MAX}')
+
+        remaining    = list(non_converged)
+        consec_hits  = {t: 0 for t in non_converged}  # consecutive hit counter per target
+
+        for m_val in phase2_m_seq:
+            if not remaining:
+                break
+
+            batch_jobs = sorted(
+                [(t, m_val, T) for t in remaining for T in T_VALUES_ALL],
+                key=lambda x: (x[1], x[2], x[0])
+            )
+            p2_rows, p2_skip, p2_done = run_phase(
+                batch_jobs,
+                f'Phase 2 — m={m_val}  ({len(remaining)} targets remaining)'
+            )
+            all_new.extend(p2_rows)
+            skipped   += p2_skip
+            completed += p2_done
+
+            # Update all_results with this batch
+            for r in p2_rows:
+                all_results[(r['target'], r['m'], r['T'])] = r
+
+            # Per-target convergence check — 2 consecutive hits required
+            still_remaining = []
+            print(f'\n── Phase 2 convergence check at m={m_val} {"─"*30}')
+            for t_key in remaining:
+                _, k_true, _ = TARGETS[t_key]
+                at_m = [v for (t, m, T), v in all_results.items()
+                        if t == t_key and m == m_val]
+                hit_this_m = (at_m and any(
+                    abs(r['n_clusters'] - k_true) <= CONV_THRESHOLD for r in at_m
+                ))
+
+                if hit_this_m:
+                    consec_hits[t_key] += 1
+                    best = min(abs(r['n_clusters'] - k_true) for r in at_m)
+                else:
+                    consec_hits[t_key] = 0   # reset — transient, not true convergence
+
+                hits = consec_hits[t_key]
+
+                if hits >= 2:
+                    print(f'  {t_key:<12}  k={k_true}  CONVERGED  '
+                          f'(|C-k| <= {CONV_THRESHOLD} for 2 consecutive m values) — done')
+                elif hits == 1:
+                    best = min(abs(r['n_clusters'] - k_true) for r in at_m)
+                    print(f'  {t_key:<12}  k={k_true}  1st hit at m={m_val}  '
+                          f'(|C-k| = {best}) — need 1 more consecutive')
+                    still_remaining.append(t_key)
+                else:
+                    diffs = ([abs(r['n_clusters'] - k_true) for r in at_m]
+                             if at_m else [])
+                    diff_str = str(min(diffs)) if diffs else 'no data'
+                    if m_val == PHASE2_M_MAX:
+                        print(f'  {t_key:<12}  k={k_true}  HARD STOP at m={PHASE2_M_MAX}  '
+                              f'(min |C-k| = {diff_str}) — not converged')
+                    else:
+                        print(f'  {t_key:<12}  k={k_true}  not converged  '
+                              f'(min |C-k| = {diff_str}) — continuing')
+                        still_remaining.append(t_key)
+
+            remaining = still_remaining
+
+        not_conv = [t for t in non_converged if consec_hits[t] < 2]
+        if not_conv:
+            print(f'\nPhase 2 complete (hard stop m={PHASE2_M_MAX}). '
+                  f'Did not converge: {not_conv}')
+        else:
+            print(f'\nAll Phase 2 targets confirmed converged (2 consecutive hits).')
     else:
         print('\nAll targets converged at base m — Phase 2 not needed.')
 

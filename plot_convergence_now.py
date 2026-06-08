@@ -2,19 +2,22 @@
 plot_convergence_now.py
 =======================
 Generates a convergence plot from whatever run_meta.csv files currently
-exist on disk — works at any point during or after simulate_parallel.py.
+exist on disk — works at any point during or after a simulation script.
 
-Scans every run folder under figures/Replication data/, reads run_meta.csv
-where available, and produces convergence_plot_current.png showing
-C(m, f*) vs m for every target and T value found.
+Scans every run folder under the selected figures directory, reads run_meta.csv
+where available, and produces a convergence plot showing C(m, f*) vs m.
 
-Safe to run while simulate_parallel.py is still running. Already-completed
-runs have their run_meta.csv written and will be included; in-progress or
-not-yet-started runs will simply be absent from the plot.
+Safe to run while a simulation is still running. Already-completed runs have
+their run_meta.csv written and will be included.
+
+Mode switch
+-----------
+  Set MODE = "flow"     → reads from figures/Replication data/  (ODE results)
+  Set MODE = "discrete" → reads from figures/Discrete GD/        (GD results)
 
 Output
 ------
-  figures/Replication data/convergence_plot_current.png
+  {FIG_BASE}/convergence_plot_current.png
 
 Usage
 -----
@@ -27,7 +30,26 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import os, csv
 
-FIG_BASE = os.path.join('figures', 'Replication data')
+# =============================================================================
+# ── Mode switch ───────────────────────────────────────────────────────────────
+# "flow"     → ODE results   in figures/Replication data/
+# "discrete" → GD results    in figures/Discrete GD/
+# =============================================================================
+MODE = "discrete"
+
+if MODE == "flow":
+    FIG_BASE         = os.path.join('figures', 'Replication data')
+    TIME_FIELD       = 'T'
+    TIME_LABEL       = 'T'
+    INNER_DIR_PREFIX = 'T='
+    MIN_TIME         = 5000   # skip low-T ODE runs (insufficient for convergence)
+else:
+    FIG_BASE         = os.path.join('figures', 'Discrete GD')
+    TIME_FIELD       = 'steps'
+    TIME_LABEL       = 'steps'
+    INNER_DIR_PREFIX = 'steps='
+    MIN_TIME         = 0      # all discrete runs use same step count; no filter needed
+
 OUT_PATH = os.path.join(FIG_BASE, 'convergence_plot_current.png')
 
 # Analytical k values — used for the horizontal reference line per target
@@ -71,16 +93,16 @@ for target_key in os.listdir(FIG_BASE):
             continue
         for t_dir in os.listdir(m_path):
             t_path = os.path.join(m_path, t_dir)
-            if not os.path.isdir(t_path) or not t_dir.startswith('T='):
+            if not os.path.isdir(t_path) or not t_dir.startswith(INNER_DIR_PREFIX):
                 continue
             meta_file = os.path.join(t_path, 'run_meta.csv')
             if not os.path.exists(meta_file):
                 continue
             with open(meta_file, newline='') as f:
                 row = next(csv.DictReader(f))
-            T_val = int(row['T'])
-            if T_val < 5000:
-                continue   # skip low-T runs — insufficient for convergence
+            T_val = int(row[TIME_FIELD])
+            if T_val < MIN_TIME:
+                continue   # skip low-T/steps runs (flow mode only)
             rows.append({
                 'target':     target_key,
                 'm':          int(row['m']),
@@ -135,7 +157,7 @@ for ax_i, tkey in enumerate(targets_present):
                 marker=markers[ti % len(markers)],
                 color=cmap[ti],
                 lw=1.5, ms=5,
-                label=f'T={T}')
+                label=f'{TIME_LABEL}={T}')
 
     # Horizontal line at analytical k
     ax.axhline(k_true, color='crimson', lw=2, linestyle='--',
@@ -153,10 +175,11 @@ for ax_i in range(len(targets_present), len(axes_flat)):
 
 n_done    = len(rows)
 n_targets = len(set(r['target'] for r in rows))
+time_note = f'{TIME_LABEL} ≥ {MIN_TIME}  only' if MIN_TIME > 0 else f'{TIME_LABEL} = {rows[0]["T"]}'
 fig.suptitle(
-    f'Open Problem 4.1 — $C(m,f^*) \\to k$ as $m \\to \\infty$\n'
+    f'Open Problem 4.1 — $C(m,f^*) \\to k$ as $m \\to \\infty$  [{MODE} mode]\n'
     f'Crimson dashed = analytical $k$    '
-    f'({n_done} completed runs across {n_targets} targets  |  T ≥ 5000 only)',
+    f'({n_done} completed runs across {n_targets} targets  |  {time_note})',
     fontsize=13)
 
 plt.tight_layout()
