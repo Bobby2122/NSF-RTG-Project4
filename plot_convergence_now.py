@@ -151,12 +151,12 @@ for ax_i, tkey in enumerate(targets_present):
 for ax_i in range(len(targets_present), len(axes_flat)):
     axes_flat[ax_i].set_visible(False)
 
-n_done = len(rows)
-n_total = 108 + 162   # simulate.py + simulate_parallel.py
+n_done    = len(rows)
+n_targets = len(set(r['target'] for r in rows))
 fig.suptitle(
     f'Open Problem 4.1 — $C(m,f^*) \\to k$ as $m \\to \\infty$\n'
     f'Crimson dashed = analytical $k$    '
-    f'({n_done} of {n_total} total runs completed)',
+    f'({n_done} completed runs across {n_targets} targets  |  T ≥ 5000 only)',
     fontsize=13)
 
 plt.tight_layout()
