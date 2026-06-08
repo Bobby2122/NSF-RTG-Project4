@@ -1,0 +1,2 @@
+target,m,steps,lr_eff,k_true,n_clusters,n_active,loss,max_da_grad,max_db_grad,active_leq_k
+sin_1pi,100,70710,0.0007071067811865475,1,35,87,0.00010377249141862774,0.00018949765741655105,0.0008024525202452829,0

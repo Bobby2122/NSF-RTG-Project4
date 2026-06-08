@@ -57,10 +57,13 @@ from multiprocessing import Pool, cpu_count
 
 # =============================================================================
 # ── Mode switch ───────────────────────────────────────────────────────────────
-# "flow"     → ODE results   in figures/Replication data/
-# "discrete" → GD results    in figures/Discrete GD/
+# "flow"             → ODE results in figures/Replication data/
+# "discrete"         → constant-lr GD in figures/Discrete GD/
+# "discrete_scaled"  → scaled-lr GD in figures/Discrete GD Scaled/
 # =============================================================================
 MODE = "discrete"
+# "flow"     → ODE results in figures/Replication data/
+# "discrete" → GD results  in figures/Discrete GD/
 
 if MODE == "flow":
     FIG_BASE   = os.path.join('figures', 'Replication data')

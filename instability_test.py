@@ -8,43 +8,34 @@ Background
 ----------
 The slides establish that the k-cluster merged state is neutrally stable.
 Goal 2 asks the converse: if you start with more than k clusters, does
-gradient flow drive the system back to k? This script tests that, and
-extends the test to runs that are near k but not exactly at k.
+gradient flow / gradient descent drive the system back to k? This script
+tests that, and extends the test to runs that are near k but not exactly at k.
 
 Qualification: a run qualifies if |n_clusters - k_true| <= NEAR_K_THRESHOLD.
+
+Mode switch
+-----------
+  Set MODE = "flow"     → reads from figures/Replication data/  (ODE results)
+                          Perturbation continues the ODE via solve_ivp.
+  Set MODE = "discrete" → reads from figures/Discrete GD/        (GD results)
+                          Perturbation continues via gradient descent steps.
 
 Three run categories and their test types
 -----------------------------------------
   exact_k  (n_clusters == k_true)
       Two injection tests: 'near' and 'isolated'.
       One extra neuron is added artificially to create a k+1 configuration.
-      Tests whether gradient flow dissolves the injected cluster.
+      Tests whether training dissolves the injected cluster.
 
   above_k  (k_true < n_clusters <= k_true + NEAR_K_THRESHOLD)
       One test: 'natural'.
-      No injection. The ODE is continued forward for T_PERTURB from the
-      current state. Tests whether the naturally overcomplete configuration
-      dissolves on its own toward k without any external perturbation.
+      No injection. Training is continued forward from the current state.
+      Tests whether the naturally overcomplete configuration dissolves toward k.
 
   below_k  (k_true - NEAR_K_THRESHOLD <= n_clusters < k_true)
       Two injection tests: 'near' and 'isolated'.
       Same injection logic as exact_k. Tests whether an under-complete
-      configuration accepts the injected neuron (final C rises toward k)
-      or rejects it (final C stays below k or returns to original).
-
-Injection strategies (for exact_k and below_k)
------------------------------------------------
-  near      -- inject just outside the boundary of an existing cluster.
-               Tests whether proximity causes the neuron to merge in.
-  isolated  -- inject at the point farthest from all cluster centers.
-               Tests whether the amplitude decays with no nearby attractor.
-
-Run order
----------
-  1. python simulate.py
-  2. python simulate_parallel.py
-  3. python verify_pruning.py
-  4. python instability_test.py   <-- this script
+      configuration accepts the injected neuron or rejects it.
 
 Outputs
 -------
@@ -53,7 +44,7 @@ Outputs
       goal2_isolated.png    -- 3-panel figure for isolated injection
       goal2_natural.png     -- 3-panel figure for natural dissolution
 
-  Global (saved in figures/Replication data/):
+  Global (saved in the selected figures directory):
       goal2_results.csv     -- one row per (run, test_type)
       goal2_summary.png     -- heatmap and bar chart across all tested runs
 """
@@ -67,36 +58,64 @@ import os, csv, time
 from multiprocessing import Pool, cpu_count
 
 # =============================================================================
+# ── Mode switch ───────────────────────────────────────────────────────────────
+# "flow"             → ODE results in figures/Replication data/
+# "discrete"         → constant-lr GD in figures/Discrete GD/
+# "discrete_scaled"  → scaled-lr GD in figures/Discrete GD Scaled/
+# =============================================================================
+MODE = "discrete"
+# "flow"     → ODE results in figures/Replication data/
+# "discrete" → GD results  in figures/Discrete GD/
+
+if MODE == "flow":
+    FIG_BASE      = os.path.join('figures', 'Replication data')
+    TIME_FIELD    = 'T'
+    TIME_LABEL    = 'T'
+    AXIS_LABEL    = 'Time'       # x-axis label on perturbation figures
+else:
+    FIG_BASE      = os.path.join('figures', 'Discrete GD')
+    TIME_FIELD    = 'steps'
+    TIME_LABEL    = 'steps'
+    AXIS_LABEL    = 'Iteration'
+
+RESULTS_CSV = os.path.join(FIG_BASE, 'goal2_results.csv')
+SUMMARY_PNG = os.path.join(FIG_BASE, 'goal2_summary.png')
+
+# =============================================================================
 # Constants
 # =============================================================================
 N_QUAD           = 400
 X_QUAD           = np.linspace(-1.0, 1.0, N_QUAD)
 DX               = X_QUAD[1] - X_QUAD[0]
 CLUSTER_TOL      = 0.02
+N_SAVE           = 300          # number of snapshots for trajectories
+
+# Flow mode: ODE integration duration
 T_PERTURB        = 1000
-N_SAVE           = 300
+
+# Discrete mode: GD continuation parameters
+LR               = 0.01
+STEPS_PERTURB    = 5000
+LOG_PERTURB      = max(1, STEPS_PERTURB // N_SAVE)   # log every ~16 steps → ~300 pts
+
 A_INJECT_SCALE   = 0.1    # injected amplitude = scale * mean|a_j|
 NEAR_K_THRESHOLD = 2      # |n_clusters - k_true| <= this qualifies a run
 
-FIG_BASE    = os.path.join('figures', 'Replication data')
-RESULTS_CSV = os.path.join(FIG_BASE, 'goal2_results.csv')
-SUMMARY_PNG = os.path.join(FIG_BASE, 'goal2_summary.png')
-
 RESULTS_FIELDS = [
     'target', 'm', 'T_original', 'k_true',
-    'run_category',       # exact_k | above_k | below_k
-    'initial_n_clusters', # C at start of test (before any perturbation)
-    'test_type',          # near | isolated | natural
-    'b_inject',           # injection location (N/A for natural)
-    'a_inject_initial',   # injected amplitude at t=0 (N/A for natural)
-    'a_inject_final',     # injected amplitude at t=T_PERTURB (N/A for natural)
-    'a_decayed',          # 1 if |a_final| < 0.1*|a_initial| (N/A for natural)
-    'b_inject_final',     # injected bias at t=T_PERTURB (N/A for natural)
-    'b_merged',           # 1 if injected bias merged into original cluster (N/A for natural)
-    'final_n_clusters',   # C after T_PERTURB
-    'cluster_change',     # final_n_clusters - initial_n_clusters
-    'returned_to_k',      # 1 if final_n_clusters == k_true
-    'approached_k',       # 1 if moved closer to k during test
+    'run_category',
+    'initial_n_clusters',
+    'test_type',
+    'b_inject',
+    'a_inject_initial',
+    'a_inject_final',
+    'a_decayed',
+    'b_inject_final',
+    'b_merged',
+    'final_n_clusters',
+    'cluster_change',
+    'returned_to_k',
+    'approached_k',
 ]
 
 NA = 'N/A'
@@ -126,6 +145,7 @@ def relu(z):
 def network(x, a, b):
     return (a * relu(x[:, None] - b[None, :])).sum(axis=1)
 
+# ODE right-hand side (flow mode only)
 def make_ode(m, f_star):
     fstar_vals = f_star(X_QUAD)
     def ode(t, y):
@@ -154,6 +174,92 @@ def get_cluster_centers(b, a, tol=CLUSTER_TOL):
         group_b.append(bs[i])
     centers.append(float(np.mean(group_b)))
     return np.array(centers)
+
+# =============================================================================
+# Discrete GD continuation helpers  (discrete mode only)
+# =============================================================================
+
+def _gd_natural(m_run, a_init, b_init, f_star_fn, lr):
+    """
+    Continue GD from (a_init, b_init) for STEPS_PERTURB steps.
+    lr is passed explicitly so discrete_scaled mode uses the same scaled lr
+    that was used during original training.
+    Returns (t_arr, b_sorted_traj, cluster_counts):
+      t_arr           shape (n_log,)
+      b_sorted_traj   shape (m_run, n_log)  sorted biases at each checkpoint
+      cluster_counts  shape (n_log,)
+    """
+    a = a_init.copy()
+    b = b_init.copy()
+    f_star = f_star_fn(X_QUAD)
+    n_log  = STEPS_PERTURB // LOG_PERTURB + 1
+    t_arr           = np.arange(n_log) * LOG_PERTURB
+    b_sorted_traj   = np.zeros((m_run, n_log))
+    cc_list         = []
+
+    b_sorted_traj[:, 0] = np.sort(b)
+    cc_list.append(count_clusters(b))
+
+    for step in range(STEPS_PERTURB):
+        H        = relu(X_QUAD[:, None] - b[None, :])
+        f        = H @ a
+        residual = f - f_star
+        da       = H.T @ residual * DX
+        db       = -(a * ((X_QUAD[:, None] > b[None, :]).T @ residual * DX))
+        a -= lr * da
+        b -= lr * db
+        if (step + 1) % LOG_PERTURB == 0:
+            idx = (step + 1) // LOG_PERTURB
+            b_sorted_traj[:, idx] = np.sort(b)
+            cc_list.append(count_clusters(b))
+
+    return t_arr, b_sorted_traj, np.array(cc_list)
+
+
+def _gd_injection(m_orig, a_init, b_init, f_star_fn, lr):
+    """
+    Continue GD from (a_init, b_init) for STEPS_PERTURB steps.
+    a_init[m_orig] and b_init[m_orig] are the injected neuron.
+    lr is passed explicitly so discrete_scaled mode uses the same scaled lr
+    that was used during original training.
+    Returns (t_arr, b_orig_sorted_traj, a_inj_traj, b_inj_traj, cluster_counts):
+      b_orig_sorted_traj  shape (m_orig, n_log)  sorted original biases
+      a_inj_traj          shape (n_log,)          injected amplitude
+      b_inj_traj          shape (n_log,)          injected bias
+      cluster_counts      shape (n_log,)          over all m_orig+1 biases
+    """
+    a = a_init.copy()
+    b = b_init.copy()
+    f_star = f_star_fn(X_QUAD)
+    n_log  = STEPS_PERTURB // LOG_PERTURB + 1
+    t_arr                = np.arange(n_log) * LOG_PERTURB
+    b_orig_sorted_traj   = np.zeros((m_orig, n_log))
+    a_inj_traj           = np.zeros(n_log)
+    b_inj_traj           = np.zeros(n_log)
+    cc_list              = []
+
+    b_orig_sorted_traj[:, 0] = np.sort(b[:m_orig])
+    a_inj_traj[0]            = a[m_orig]
+    b_inj_traj[0]            = b[m_orig]
+    cc_list.append(count_clusters(b))
+
+    for step in range(STEPS_PERTURB):
+        H        = relu(X_QUAD[:, None] - b[None, :])
+        f        = H @ a
+        residual = f - f_star
+        da       = H.T @ residual * DX
+        db       = -(a * ((X_QUAD[:, None] > b[None, :]).T @ residual * DX))
+        a -= lr * da
+        b -= lr * db
+        if (step + 1) % LOG_PERTURB == 0:
+            idx = (step + 1) // LOG_PERTURB
+            b_orig_sorted_traj[:, idx] = np.sort(b[:m_orig])
+            a_inj_traj[idx]            = a[m_orig]
+            b_inj_traj[idx]            = b[m_orig]
+            cc_list.append(count_clusters(b))
+
+    return t_arr, b_orig_sorted_traj, a_inj_traj, b_inj_traj, np.array(cc_list)
+
 
 # =============================================================================
 # Injection location strategies
@@ -216,13 +322,17 @@ def load_qualifying_run(run_dir):
             b_vals.append(float(row['b_j']))
             a_vals.append(float(row['a_j']))
 
+    # lr_eff: stored in run_meta for discrete_scaled; fall back to global LR otherwise
+    lr_eff = float(meta['lr_eff']) if 'lr_eff' in meta else LR
+
     return {
         'target':       meta['target'],
         'm':            int(meta['m']),
-        'T_original':   int(meta['T']),
+        'T_original':   int(meta[TIME_FIELD]),   # ODE T or GD steps
         'k_true':       k_true,
         'n_clusters':   n_clusters,
         'run_category': category,
+        'lr_eff':       lr_eff,
         'b':            np.array(b_vals),
         'a':            np.array(a_vals),
     }
@@ -234,75 +344,86 @@ def load_qualifying_run(run_dir):
 def test_one(args):
     run_dir, run_data, test_type = args
 
-    target_key  = run_data['target']
-    m_orig      = run_data['m']
-    T_original  = run_data['T_original']
-    k_true      = run_data['k_true']
-    b_orig      = run_data['b']
-    a_orig      = run_data['a']
+    target_key   = run_data['target']
+    m_orig       = run_data['m']
+    T_original   = run_data['T_original']
+    k_true       = run_data['k_true']
+    b_orig       = run_data['b']
+    a_orig       = run_data['a']
     run_category = run_data['run_category']
-    initial_n   = run_data['n_clusters']
+    initial_n    = run_data['n_clusters']
+    # Use the same lr as original training (important for discrete_scaled mode)
+    lr_eff       = run_data.get('lr_eff', LR)
 
     if target_key not in TARGETS:
         return None
     target_label, _, f_star = TARGETS[target_key]
 
-    out_fig = os.path.join(run_dir, f'goal2_{test_type}.png')
+    out_fig         = os.path.join(run_dir, f'goal2_{test_type}.png')
     cluster_centers = get_cluster_centers(b_orig, a_orig)
 
     # =========================================================================
-    # Natural dissolution test (above_k only, no injection)
+    # Natural dissolution test (above_k only)
     # =========================================================================
     if test_type == 'natural':
         m_run = m_orig
-        sol   = solve_ivp(
-            make_ode(m_run, f_star),
-            t_span=(0.0, T_PERTURB),
-            y0=np.concatenate([a_orig, b_orig]),
-            method='RK45',
-            t_eval=np.linspace(0.0, T_PERTURB, N_SAVE),
-            rtol=1e-4, atol=1e-6,
-            max_step=max(0.1, T_PERTURB / 500),
-        )
 
-        cluster_counts = np.array([
-            count_clusters(sol.y[m_run:, i]) for i in range(sol.y.shape[1])
-        ])
-        final_n       = int(cluster_counts[-1])
+        if MODE == "flow":
+            sol = solve_ivp(
+                make_ode(m_run, f_star),
+                t_span=(0.0, T_PERTURB),
+                y0=np.concatenate([a_orig, b_orig]),
+                method='RK45',
+                t_eval=np.linspace(0.0, T_PERTURB, N_SAVE),
+                rtol=1e-4, atol=1e-6,
+                max_step=max(0.1, T_PERTURB / 500),
+            )
+            t_arr          = sol.t
+            b_sorted_traj  = np.sort(sol.y[m_run:, :], axis=0)  # (m_run, n_pts)
+            cluster_counts = np.array([
+                count_clusters(sol.y[m_run:, i]) for i in range(sol.y.shape[1])
+            ])
+        else:  # discrete
+            t_arr, b_sorted_traj, cluster_counts = _gd_natural(
+                m_run, a_orig, b_orig, f_star, lr_eff)
+
+        final_n        = int(cluster_counts[-1])
         cluster_change = final_n - initial_n
         returned_to_k  = int(final_n == k_true)
-        approached_k   = int(final_n < initial_n)  # dissolved toward k
+        approached_k   = int(final_n < initial_n)
 
         if not os.path.exists(out_fig):
             fig, axes = plt.subplots(1, 3, figsize=(15, 4))
             fig.suptitle(
-                f'Goal 2: Natural Dissolution (above k)\n'
-                f'target={target_label},  m={m_orig},  T_orig={T_original},  k={k_true}'
-                f'  |  initial C={initial_n},  final C={final_n},  returned to k: {bool(returned_to_k)}',
+                f'Goal 2: Natural Dissolution (above k)  [{MODE} mode]\n'
+                f'target={target_label},  m={m_orig},  '
+                f'{TIME_LABEL}_orig={T_original},  k={k_true}'
+                f'  |  initial C={initial_n},  final C={final_n},'
+                f'  returned to k: {bool(returned_to_k)}',
                 fontsize=10)
 
             ax = axes[0]
             for j in range(m_run):
-                ax.plot(sol.t, np.sort(sol.y[m_run:, :], axis=0)[j],
+                ax.plot(t_arr, b_sorted_traj[j],
                         color='steelblue', alpha=min(0.3, 15.0/m_run), lw=0.5)
             for cc in cluster_centers:
                 ax.axhline(cc, color='green', lw=0.8, linestyle='--', alpha=0.5)
-            ax.set_xlabel('Time after test start')
+            ax.set_xlabel(f'{AXIS_LABEL} after test start')
             ax.set_ylabel('Bias location')
-            ax.set_title('Bias Trajectories\n(green = original cluster centers)')
-            ax.set_xlim([0, T_PERTURB])
+            ax.set_title(f'Bias Trajectories\n(green = original cluster centers)')
+            ax.set_xlim([0, t_arr[-1]])
 
             ax = axes[1]
-            ax.plot(sol.t, cluster_counts, color='purple', lw=1.8)
+            ax.plot(t_arr, cluster_counts, color='purple', lw=1.8)
             ax.axhline(k_true,    color='crimson', lw=1.5, linestyle='--',
                        label=f'k={k_true} (target)')
             ax.axhline(initial_n, color='gray',   lw=1.0, linestyle=':',
                        label=f'initial C={initial_n}')
-            ax.set_xlabel('Time after test start')
+            ax.set_xlabel(f'{AXIS_LABEL} after test start')
             ax.set_ylabel('Cluster count $C(t)$')
             ax.set_title(f'Cluster Count\nfinal={final_n},  returned to k: {bool(returned_to_k)}')
             ax.legend(fontsize=8)
-            ax.set_xlim([0, T_PERTURB])
+            ax.set_xlim([0, t_arr[-1]])
             ax.grid(True, alpha=0.3)
 
             ax = axes[2]
@@ -323,23 +444,23 @@ def test_one(args):
             plt.close()
 
         return {
-            'target':            target_key,
-            'm':                 m_orig,
-            'T_original':        T_original,
-            'k_true':            k_true,
-            'run_category':      run_category,
+            'target':             target_key,
+            'm':                  m_orig,
+            'T_original':         T_original,
+            'k_true':             k_true,
+            'run_category':       run_category,
             'initial_n_clusters': initial_n,
-            'test_type':         test_type,
-            'b_inject':          NA,
-            'a_inject_initial':  NA,
-            'a_inject_final':    NA,
-            'a_decayed':         NA,
-            'b_inject_final':    NA,
-            'b_merged':          NA,
-            'final_n_clusters':  final_n,
-            'cluster_change':    cluster_change,
-            'returned_to_k':     returned_to_k,
-            'approached_k':      approached_k,
+            'test_type':          test_type,
+            'b_inject':           NA,
+            'a_inject_initial':   NA,
+            'a_inject_final':     NA,
+            'a_decayed':          NA,
+            'b_inject_final':     NA,
+            'b_merged':           NA,
+            'final_n_clusters':   final_n,
+            'cluster_change':     cluster_change,
+            'returned_to_k':      returned_to_k,
+            'approached_k':       approached_k,
         }
 
     # =========================================================================
@@ -355,21 +476,26 @@ def test_one(args):
     a_init = np.append(a_orig, a_inject_initial)
     b_init = np.append(b_orig, b_inject)
 
-    sol = solve_ivp(
-        make_ode(m_new, f_star),
-        t_span=(0.0, T_PERTURB),
-        y0=np.concatenate([a_init, b_init]),
-        method='RK45',
-        t_eval=np.linspace(0.0, T_PERTURB, N_SAVE),
-        rtol=1e-4, atol=1e-6,
-        max_step=max(0.1, T_PERTURB / 500),
-    )
-
-    a_inj_traj = sol.y[m_orig, :]
-    b_inj_traj = sol.y[m_new + m_orig, :]
-    cluster_counts = np.array([
-        count_clusters(sol.y[m_new:, i]) for i in range(sol.y.shape[1])
-    ])
+    if MODE == "flow":
+        sol = solve_ivp(
+            make_ode(m_new, f_star),
+            t_span=(0.0, T_PERTURB),
+            y0=np.concatenate([a_init, b_init]),
+            method='RK45',
+            t_eval=np.linspace(0.0, T_PERTURB, N_SAVE),
+            rtol=1e-4, atol=1e-6,
+            max_step=max(0.1, T_PERTURB / 500),
+        )
+        t_arr               = sol.t
+        a_inj_traj          = sol.y[m_orig, :]
+        b_inj_traj          = sol.y[m_new + m_orig, :]
+        b_orig_sorted_traj  = np.sort(sol.y[m_new:m_new + m_orig, :], axis=0)
+        cluster_counts      = np.array([
+            count_clusters(sol.y[m_new:, i]) for i in range(sol.y.shape[1])
+        ])
+    else:  # discrete
+        t_arr, b_orig_sorted_traj, a_inj_traj, b_inj_traj, cluster_counts = \
+            _gd_injection(m_orig, a_init, b_init, f_star, lr_eff)
 
     a_inject_final = float(a_inj_traj[-1])
     b_inject_final = float(b_inj_traj[-1])
@@ -379,9 +505,6 @@ def test_one(args):
     b_merged       = int(np.min(np.abs(b_inject_final - cluster_centers)) < CLUSTER_TOL)
     returned_to_k  = int(final_n == k_true)
 
-    # approached_k: for exact_k (initial==k), injection raised to k+1, so
-    # returned_to_k == approached_k. For below_k (initial<k), approached_k
-    # means final moved closer to k (final > initial).
     if run_category == 'below_k':
         approached_k = int(final_n > initial_n)
     else:
@@ -390,47 +513,50 @@ def test_one(args):
     if not os.path.exists(out_fig):
         fig, axes = plt.subplots(1, 3, figsize=(15, 4))
         fig.suptitle(
-            f'Goal 2: Instability Test ({test_type} injection)  [{run_category}]\n'
-            f'target={target_label},  m={m_orig},  T_orig={T_original},  k={k_true}'
-            f'  |  initial C={initial_n},  final C={final_n},  returned to k: {bool(returned_to_k)}',
+            f'Goal 2: Instability Test ({test_type} injection)  '
+            f'[{run_category}]  [{MODE} mode]\n'
+            f'target={target_label},  m={m_orig},  '
+            f'{TIME_LABEL}_orig={T_original},  k={k_true}'
+            f'  |  initial C={initial_n},  final C={final_n},'
+            f'  returned to k: {bool(returned_to_k)}',
             fontsize=10)
 
         ax = axes[0]
         for j in range(m_orig):
-            ax.plot(sol.t, np.sort(sol.y[m_new:m_new+m_orig, :], axis=0)[j],
+            ax.plot(t_arr, b_orig_sorted_traj[j],
                     color='steelblue', alpha=min(0.3, 15.0/m_orig), lw=0.5)
-        ax.plot(sol.t, b_inj_traj, color='crimson', lw=1.8, label='Injected neuron')
+        ax.plot(t_arr, b_inj_traj, color='crimson', lw=1.8, label='Injected neuron')
         for cc in cluster_centers:
             ax.axhline(cc, color='green', lw=0.8, linestyle='--', alpha=0.5)
-        ax.set_xlabel('Time after injection')
+        ax.set_xlabel(f'{AXIS_LABEL} after injection')
         ax.set_ylabel('Bias location')
         ax.set_title('Bias Trajectories\n(red=injected, green=original clusters)')
         ax.legend(fontsize=8)
-        ax.set_xlim([0, T_PERTURB])
+        ax.set_xlim([0, t_arr[-1]])
 
         ax = axes[1]
-        ax.plot(sol.t, np.abs(a_inj_traj), color='darkorange', lw=1.8)
+        ax.plot(t_arr, np.abs(a_inj_traj), color='darkorange', lw=1.8)
         ax.axhline(0.1 * abs(a_inject_initial), color='k', lw=1,
                    linestyle='--', label='10% of initial (decay threshold)')
-        ax.set_xlabel('Time after injection')
+        ax.set_xlabel(f'{AXIS_LABEL} after injection')
         ax.set_ylabel('$|a_{\\mathrm{inject}}(t)|$')
         ax.set_title(f'Injected Amplitude\ninitial={a_inject_initial:.3f},  '
                      f'final={abs(a_inject_final):.3f},  decayed: {bool(a_decayed)}')
         ax.legend(fontsize=8)
-        ax.set_xlim([0, T_PERTURB])
+        ax.set_xlim([0, t_arr[-1]])
         ax.grid(True, alpha=0.3)
 
         ax = axes[2]
-        ax.plot(sol.t, cluster_counts, color='purple', lw=1.8)
-        ax.axhline(k_true,    color='crimson', lw=1.5, linestyle='--',
+        ax.plot(t_arr, cluster_counts, color='purple', lw=1.8)
+        ax.axhline(k_true,        color='crimson', lw=1.5, linestyle='--',
                    label=f'k={k_true}')
-        ax.axhline(initial_n + 1, color='gray', lw=1.0, linestyle=':',
+        ax.axhline(initial_n + 1, color='gray',   lw=1.0, linestyle=':',
                    label=f'post-inject={initial_n+1}')
-        ax.set_xlabel('Time after injection')
+        ax.set_xlabel(f'{AXIS_LABEL} after injection')
         ax.set_ylabel('Cluster count $C(t)$')
         ax.set_title(f'Cluster Count\nfinal={final_n},  returned to k: {bool(returned_to_k)}')
         ax.legend(fontsize=8)
-        ax.set_xlim([0, T_PERTURB])
+        ax.set_xlim([0, t_arr[-1]])
         ax.set_ylim([max(0, k_true - 1), initial_n + 3])
         ax.grid(True, alpha=0.3)
 
@@ -465,20 +591,17 @@ def test_one(args):
 def make_summary_figure(results):
     """
     Left:  heatmap of returned_to_k / approached_k for every (run, test_type).
-           Columns: near, isolated, natural.
-           Cells that do not apply to a run are shown in light gray.
     Right: bar chart of success rate per test_type.
     """
-    test_types  = ['near', 'isolated', 'natural']
-    categories  = ['exact_k', 'above_k', 'below_k']
-    cat_colors  = {'exact_k': '#4a90d9', 'above_k': '#e67e22', 'below_k': '#27ae60'}
+    test_types = ['near', 'isolated', 'natural']
 
-    # Build run label list preserving order
     run_labels = []
     run_cats   = []
     seen       = set()
     for r in results:
-        lbl = f"{r['target']}  m={r['m']}  T={r['T_original']}  C={r['initial_n_clusters']}  [{r['run_category']}]"
+        lbl = (f"{r['target']}  m={r['m']}  "
+               f"{TIME_LABEL}={r['T_original']}  "
+               f"C={r['initial_n_clusters']}  [{r['run_category']}]")
         if lbl not in seen:
             run_labels.append(lbl)
             run_cats.append(r['run_category'])
@@ -486,18 +609,19 @@ def make_summary_figure(results):
 
     data = {lbl: {} for lbl in run_labels}
     for r in results:
-        lbl  = f"{r['target']}  m={r['m']}  T={r['T_original']}  C={r['initial_n_clusters']}  [{r['run_category']}]"
-        val  = int(r['returned_to_k']) if r['returned_to_k'] != NA else int(r['approached_k'])
+        lbl = (f"{r['target']}  m={r['m']}  "
+               f"{TIME_LABEL}={r['T_original']}  "
+               f"C={r['initial_n_clusters']}  [{r['run_category']}]")
+        val = int(r['returned_to_k']) if r['returned_to_k'] != NA else int(r['approached_k'])
         data[lbl][r['test_type']] = val
 
     n_runs = len(run_labels)
     fig_h  = max(5, n_runs * 0.35 + 3)
     fig, axes = plt.subplots(1, 2, figsize=(16, fig_h))
     fig.suptitle(
-        f'Goal 2: Instability Near k  (threshold = ±{NEAR_K_THRESHOLD})',
+        f'Goal 2: Instability Near k  (threshold = ±{NEAR_K_THRESHOLD})  [{MODE} mode]',
         fontsize=13)
 
-    # Left: heatmap
     ax = axes[0]
     CMAP_VALID = matplotlib.colors.ListedColormap(['crimson', 'limegreen'])
 
@@ -509,7 +633,6 @@ def make_summary_figure(results):
 
     masked = np.ma.masked_invalid(mat)
     ax.imshow(masked, cmap=CMAP_VALID, vmin=0, vmax=1, aspect='auto')
-    # Gray for N/A cells
     na_overlay = np.zeros((n_runs, len(test_types), 4))
     for i in range(n_runs):
         for j in range(len(test_types)):
@@ -526,14 +649,13 @@ def make_summary_figure(results):
     for i in range(n_runs):
         for j, tt in enumerate(test_types):
             if not np.isnan(mat[i, j]):
-                ax.text(j, i, 'YES' if mat[i,j]==1 else 'NO',
+                ax.text(j, i, 'YES' if mat[i, j] == 1 else 'NO',
                         ha='center', va='center', fontsize=6,
                         color='white', fontweight='bold')
             else:
                 ax.text(j, i, 'N/A', ha='center', va='center',
                         fontsize=6, color='#888888')
 
-    # Right: bar chart per test_type
     ax = axes[1]
     bar_colors_tt = ['steelblue', 'darkorange', 'purple']
     for ji, tt in enumerate(test_types):
@@ -573,6 +695,12 @@ def _worker(args):
 
 if __name__ == '__main__':
     t_start = time.time()
+
+    print(f'Mode: {MODE}  →  {FIG_BASE}')
+    if MODE == "flow":
+        print(f'Perturbation: ODE   T_PERTURB={T_PERTURB}')
+    else:
+        print(f'Perturbation: GD    STEPS_PERTURB={STEPS_PERTURB}  lr={LR}')
 
     # ── Discover and classify qualifying runs ──────────────────────────────────
     qualifying = []
@@ -634,15 +762,15 @@ if __name__ == '__main__':
             if key in existing and os.path.exists(out_fig):
                 skip_count += 1
                 print(f'  SKIP  {run_data["target"]:<12}  '
-                      f'm={run_data["m"]:<5}  T={run_data["T_original"]:<6}  '
+                      f'm={run_data["m"]:<5}  '
+                      f'{TIME_LABEL}={run_data["T_original"]:<6}  '
                       f'{tt:<10}  [{run_data["run_category"]}]')
             else:
                 jobs.append((run_dir, run_data, tt))
 
-    # Cap workers conservatively: ODE integration for large m is memory-heavy.
-    # Each spawned process carries ~100 MB Python runtime overhead on top of
-    # numpy arrays, so too many workers at once can exhaust available RAM.
-    n_workers = max(1, min(cpu_count() - 2, 6))
+    # Cap workers: ODE integration for large m is memory-heavy.
+    # For discrete mode, GD is cheaper so we can use more workers.
+    n_workers = max(1, min(cpu_count() - 2, 6 if MODE == "flow" else 12))
     print(f'\nJobs to run : {len(jobs)}')
     print(f'Skipped     : {skip_count}')
     print(f'Workers     : {n_workers}')
@@ -664,7 +792,8 @@ if __name__ == '__main__':
                        else int(result['approached_k']))
             label   = 'SUCCESS' if success else 'no change'
             print(f'  DONE  {result["target"]:<12}  '
-                  f'm={result["m"]:<5}  T={result["T_original"]:<6}  '
+                  f'm={result["m"]:<5}  '
+                  f'{TIME_LABEL}={result["T_original"]:<6}  '
                   f'{result["test_type"]:<10}  [{result["run_category"]}]  '
                   f'C: {result["initial_n_clusters"]} -> {result["final_n_clusters"]}'
                   f'  k={result["k_true"]}  [{label}]')

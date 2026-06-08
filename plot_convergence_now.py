@@ -28,7 +28,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import os, csv
+import os, csv, tempfile
 
 # =============================================================================
 # ── Mode switch ───────────────────────────────────────────────────────────────
@@ -36,13 +36,15 @@ import os, csv
 # "discrete" → GD results    in figures/Discrete GD/
 # =============================================================================
 MODE = "discrete"
+# "flow"     → ODE results in figures/Replication data/
+# "discrete" → GD results  in figures/Discrete GD/
 
 if MODE == "flow":
     FIG_BASE         = os.path.join('figures', 'Replication data')
     TIME_FIELD       = 'T'
     TIME_LABEL       = 'T'
     INNER_DIR_PREFIX = 'T='
-    MIN_TIME         = 5000   # skip low-T ODE runs (insufficient for convergence)
+    MIN_TIME         = 0      # include all T values (T_FINAL=500 is the standard run)
 else:
     FIG_BASE         = os.path.join('figures', 'Discrete GD')
     TIME_FIELD       = 'steps'
@@ -125,7 +127,14 @@ if not rows:
 targets_present = list(dict.fromkeys(
     k for k in LABELS if any(r['target'] == k for r in rows)
 ))
-T_values_present = sorted(set(r['T'] for r in rows))
+
+# In flow mode, group series by T so multiple ODE runs appear as separate lines.
+# In discrete mode, steps vary with m (scaled lr), so group everything as one
+# series per target — splitting by T would give one isolated dot per m.
+if MODE == 'flow':
+    T_values_present = sorted(set(r['T'] for r in rows))
+else:
+    T_values_present = [None]   # sentinel: plot all m as a single connected line
 
 n_targets = len(targets_present)
 ncols     = 3
@@ -145,10 +154,23 @@ for ax_i, tkey in enumerate(targets_present):
     label  = LABELS[tkey]
 
     for ti, T in enumerate(T_values_present):
-        pts = sorted(
-            [r for r in rows if r['target'] == tkey and r['T'] == T],
-            key=lambda r: r['m']
-        )
+        if T is None:
+            # Discrete mode: one series across all m, take best (highest-steps) run per m
+            best = {}
+            for r in rows:
+                if r['target'] != tkey:
+                    continue
+                if r['m'] not in best or r['T'] > best[r['m']]['T']:
+                    best[r['m']] = r
+            pts       = sorted(best.values(), key=lambda r: r['m'])
+            series_lbl = 'Discrete GD (scaled lr)'
+        else:
+            pts = sorted(
+                [r for r in rows if r['target'] == tkey and r['T'] == T],
+                key=lambda r: r['m']
+            )
+            series_lbl = f'{TIME_LABEL}={T}'
+
         if not pts:
             continue
         ms = [r['m']          for r in pts]
@@ -157,7 +179,7 @@ for ax_i, tkey in enumerate(targets_present):
                 marker=markers[ti % len(markers)],
                 color=cmap[ti],
                 lw=1.5, ms=5,
-                label=f'{TIME_LABEL}={T}')
+                label=series_lbl)
 
     # Horizontal line at analytical k
     ax.axhline(k_true, color='crimson', lw=2, linestyle='--',
@@ -175,7 +197,11 @@ for ax_i in range(len(targets_present), len(axes_flat)):
 
 n_done    = len(rows)
 n_targets = len(set(r['target'] for r in rows))
-time_note = f'{TIME_LABEL} ≥ {MIN_TIME}  only' if MIN_TIME > 0 else f'{TIME_LABEL} = {rows[0]["T"]}'
+if MODE == 'flow':
+    time_note = f'{TIME_LABEL} ≥ {MIN_TIME}  only' if MIN_TIME > 0 else f'{TIME_LABEL} = {rows[0]["T"]}'
+else:
+    step_vals = sorted(set(r['T'] for r in rows))
+    time_note = f'steps = {step_vals[0]}–{step_vals[-1]} (scaled with m)'
 fig.suptitle(
     f'Open Problem 4.1 — $C(m,f^*) \\to k$ as $m \\to \\infty$  [{MODE} mode]\n'
     f'Crimson dashed = analytical $k$    '
@@ -183,7 +209,22 @@ fig.suptitle(
     fontsize=13)
 
 plt.tight_layout()
-plt.savefig(OUT_PATH, bbox_inches='tight', dpi=130)
-plt.close()
+
+# Save to a temp file in the same directory, then atomically replace the
+# target so a locked/open PNG (image viewer, OneDrive sync) can't block us.
+_dir = os.path.dirname(OUT_PATH)
+_fd, _tmp = tempfile.mkstemp(suffix='.png', dir=_dir)
+os.close(_fd)
+try:
+    plt.savefig(_tmp, bbox_inches='tight', dpi=130)
+    plt.close()
+    os.replace(_tmp, OUT_PATH)
+except Exception:
+    plt.close()
+    try:
+        os.remove(_tmp)
+    except OSError:
+        pass
+    raise
 
 print(f'Saved -> {OUT_PATH}')

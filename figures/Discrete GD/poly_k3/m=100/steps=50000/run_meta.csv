@@ -1,2 +1,0 @@
-target,m,steps,k_true,n_clusters,n_active,loss,max_da_grad,max_db_grad,active_leq_k
-poly_k3,100,50000,3,40,89,1.1272167638115642e-05,3.386816767207781e-05,6.828087453651588e-05,0

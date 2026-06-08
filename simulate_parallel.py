@@ -1,33 +1,29 @@
 """
 simulate_parallel.py
 ====================
-Parallel version of simulate.py using multiprocessing.Pool.
+Parallel ODE gradient-flow simulation for Open Problem 4.1.
 
-Conjecture (Open Problem 4.1, slide 95):
+Conjecture:
     lim_{m -> inf} C(m, f*) = #{x in [-1,1] : f*''(x) = 0 and changes sign}
 
-New in this script vs simulate.py
-----------------------------------
-  - Multiprocessing: runs multiple (target, m, T) combos simultaneously
-  - Larger m : [2000, 3000, 5000]  (in addition to existing [50..1500])
-  - T values : [5000, 10000] only  (lower T gave no convergence evidence)
-  - Three new targets with k >= 9:
-      sin_5pi  sin(5*pi*x)  k=9
-      sin_6pi  sin(6*pi*x)  k=11
-      sin_7pi  sin(7*pi*x)  k=13
+Design
+------
+  Fixed T = T_FINAL (single integration time — once the ODE has equilibrated,
+  more T does not change the cluster count; only m matters for the conjecture).
+  Flat m sweep across all targets — no Phase 2 logic, no convergence gating.
+  Jobs are ordered (m, target) so every target has small-m data even if
+  interrupted early.
 
-Skip logic
-----------
-  All (target, m, T) combinations are new since T in {5000, 10000} was never
-  run by simulate.py. Skip only if all 4 output files + run_meta.csv already
-  exist (Ctrl+C safety across restarts).
-
-Output files  — does NOT overwrite simulate.py outputs
--------------------------------------------------------
-  Per run  : figures/Replication data/{target}/m={m}/T={T}/  (4 files + run_meta)
-  Summary  : figures/Replication data/run_summary_parallel.csv
-  Plot     : figures/Replication data/convergence_plot_parallel.png
-             (includes simulate.py data from run_summary.csv for full picture)
+Output
+------
+  Per run : figures/Replication data/{target}/m={m}/T={T_FINAL}/
+                slide93_reproduction.png
+                clusters_vs_inflections.png
+                ode_verification.png
+                convergence_check.csv
+                run_meta.csv
+  Summary : figures/Replication data/run_summary_parallel.csv
+  Plot    : figures/Replication data/convergence_plot_parallel.png
 
 Usage
 -----
@@ -50,7 +46,7 @@ X_QUAD = np.linspace(-1.0, 1.0, N_QUAD)
 DX     = X_QUAD[1] - X_QUAD[0]
 
 # =============================================================================
-# Core math  (module-level so workers can access after re-import on Windows)
+# Core math
 # =============================================================================
 
 def relu(z):
@@ -99,11 +95,7 @@ def get_cluster_centers(biases, tol=0.02):
     return np.array(centers)
 
 # =============================================================================
-# Target functions — must be named defs (not lambdas) for multiprocessing pickle
-#
-# Analytical inflection-point counts for sin(n*pi*x):
-#   f''(x) = -n^2*pi^2 * sin(n*pi*x)
-#   zeros at x = j/n for j in {-(n-1), ..., 0, ..., n-1}  => 2n-1 inflection pts
+# Target functions  (named defs — not lambdas — for multiprocessing pickle)
 # =============================================================================
 
 def f_sin_1pi(x): return np.sin(    np.pi * x)
@@ -112,11 +104,10 @@ def f_sin_2pi(x): return np.sin(2 * np.pi * x)
 def f_poly_k3(x): return x**5 - 3 * x**3
 def f_sin_3pi(x): return np.sin(3 * np.pi * x)
 def f_sin_4pi(x): return np.sin(4 * np.pi * x)
-def f_sin_5pi(x): return np.sin(5 * np.pi * x)   # k=9
-def f_sin_6pi(x): return np.sin(6 * np.pi * x)   # k=11
-def f_sin_7pi(x): return np.sin(7 * np.pi * x)   # k=13
+def f_sin_5pi(x): return np.sin(5 * np.pi * x)
+def f_sin_6pi(x): return np.sin(6 * np.pi * x)
+def f_sin_7pi(x): return np.sin(7 * np.pi * x)
 
-# key -> (plot label, analytical k, function)
 TARGETS = {
     'sin_1pi': (r'$\sin(\pi x)$',      1,  f_sin_1pi),
     'x_cubed': (r'$x^3$',              1,  f_x_cubed),
@@ -149,36 +140,31 @@ def get_inflection_locations(target_key):
 # Sweep parameters
 # =============================================================================
 
-M_VALUES_ALL       = [50, 100, 250, 500, 1000]  # base sweep — all targets
-PHASE2_M_FIXED     = [1500, 2500]              # Phase 2 always starts with these two m values
-PHASE2_M_INCREMENT = 500                       # increment after 2500 (options: 500, 1000, 2500)
-PHASE2_M_MAX       = 5000                      # Phase 2 hard cap — stops here even if not converged
-CONV_THRESHOLD     = 1                         # |C - k| <= this counts as converged
-T_VALUES_ALL       = [5000, 10000]             # only long runs — lower T gave no convergence evidence
+T_FINAL  = 500                                        # fixed integration time
+M_VALUES = [50, 100, 250, 500, 1000, 2000, 3500, 5000]  # flat m sweep
 
 N_SAVE           = 300
 SEED             = 42
 ACTIVE_THRESHOLD = 0.05
 
-FIG_BASE         = os.path.join('figures', 'Replication data')
-ORIG_SUMMARY_CSV = os.path.join(FIG_BASE, 'run_summary.csv')          # simulate.py — read only
-SUMMARY_CSV      = os.path.join(FIG_BASE, 'run_summary_parallel.csv') # this script's output only
-CONV_PLOT        = os.path.join(FIG_BASE, 'convergence_plot_parallel.png')
+FIG_BASE    = os.path.join('figures', 'Replication data')
+SUMMARY_CSV = os.path.join(FIG_BASE, 'run_summary_parallel.csv')
+CONV_PLOT   = os.path.join(FIG_BASE, 'convergence_plot_parallel.png')
 
 META_FIELDS = ['target', 'm', 'T', 'k_true', 'n_clusters', 'n_active',
                'loss', 'max_da', 'max_db', 'active_leq_k']
 
 # =============================================================================
-# Single-run worker  (called by each pool process)
+# Single-run worker
 # =============================================================================
 
 def run_one(args):
     """
-    Simulate one (target_key, m, T) combination and write all outputs.
-    Returns a metrics dict (with '_skipped' flag if recovered from run_meta.csv),
-    or None if the run was already done before run_meta.csv existed.
+    Simulate one (target_key, m) combination at T=T_FINAL.
+    Returns a metrics dict (with '_skipped' True if recovered from run_meta.csv).
     """
-    target_key, m, T = args
+    target_key, m = args
+    T = T_FINAL
     target_label, k_true, f_star = TARGETS[target_key]
 
     out_dir = os.path.join(FIG_BASE, target_key, f'm={m}', f'T={T}')
@@ -188,23 +174,23 @@ def run_one(args):
     f_csv   = os.path.join(out_dir, 'convergence_check.csv')
     f_meta  = os.path.join(out_dir, 'run_meta.csv')
 
-    # All output files exist — recover metrics from run_meta.csv
+    # ── Skip if already complete ──────────────────────────────────────────────
     if all(os.path.exists(p) for p in [f_traj, f_clust, f_ode, f_csv]):
         if os.path.exists(f_meta):
             with open(f_meta, newline='') as mf:
                 row = next(csv.DictReader(mf))
             return {
                 'target': target_key, 'm': m, 'T': T,
-                'k_true': int(row['k_true']),
-                'n_clusters': int(row['n_clusters']),
-                'n_active': int(row['n_active']),
-                'loss': float(row['loss']),
-                'max_da': float(row['max_da']),
-                'max_db': float(row['max_db']),
+                'k_true':       int(row['k_true']),
+                'n_clusters':   int(row['n_clusters']),
+                'n_active':     int(row['n_active']),
+                'loss':         float(row['loss']),
+                'max_da':       float(row['max_da']),
+                'max_db':       float(row['max_db']),
                 'active_leq_k': int(row['active_leq_k']),
                 '_skipped': True,
             }
-        return None  # pre-run_meta.csv era, skip silently
+        return None   # pre-run_meta era, skip silently
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -225,9 +211,9 @@ def run_one(args):
     )
     elapsed = time.time() - t0
 
-    # ── Loss (sparse) ─────────────────────────────────────────────────────────
-    fstar_vals = f_star(X_QUAD)
-    snap_idx   = np.arange(0, N_SAVE, 5)
+    # ── Loss ──────────────────────────────────────────────────────────────────
+    fstar_vals    = f_star(X_QUAD)
+    snap_idx      = np.arange(0, N_SAVE, 5)
     losses_sparse = np.array([
         0.5 * np.trapezoid(
             (network(X_QUAD, sol.y[:m, i], sol.y[m:, i]) - fstar_vals)**2, X_QUAD)
@@ -245,145 +231,140 @@ def run_one(args):
     n_clusters      = count_clusters(b_final)
     cluster_centers = get_cluster_centers(b_final)
 
-    # ── Goal 3: stationarity ──────────────────────────────────────────────────
     da_final, db_final, R_final = compute_ode_velocities(a_final, b_final, f_star)
     a_max     = max(float(np.abs(a_final).max()), 1e-12)
     is_active = np.abs(a_final) > ACTIVE_THRESHOLD * a_max
     n_active  = int(is_active.sum())
 
     sort_idx = np.argsort(b_final)
-    b_s      = b_final[sort_idx];  a_s = a_final[sort_idx]
-    da_s     = da_final[sort_idx]; db_s = db_final[sort_idx]
-    R_s      = R_final[sort_idx];  active_s = is_active[sort_idx]
+    b_s  = b_final[sort_idx];  a_s  = a_final[sort_idx]
+    da_s = da_final[sort_idx]; db_s = db_final[sort_idx]
+    R_s  = R_final[sort_idx];  active_s = is_active[sort_idx]
 
     infl_x = get_inflection_locations(target_key)
 
     # ── Figure 1: trajectories / fit / loss ───────────────────────────────────
-    if not os.path.exists(f_traj):
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-        fig.suptitle(
-            f'target={target_label},  m={m},  T={T}'
-            f'  |  clusters={n_clusters},  k={k_true}', fontsize=12)
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    fig.suptitle(
+        f'target={target_label},  m={m},  T={T}'
+        f'  |  clusters={n_clusters},  k={k_true}', fontsize=12)
 
-        ax = axes[0]
-        sorted_b_traj = np.sort(sol.y[m:, :], axis=0)
-        alpha = min(0.4, 20.0 / m)
-        for j in range(m):
-            ax.plot(sol.t, sorted_b_traj[j], color='steelblue',
-                    alpha=alpha, linewidth=0.4)
-        ax.set_xlabel('Time'); ax.set_ylabel('Bias value')
-        ax.set_title('Sorted Bias Trajectories'); ax.set_xlim([0, T])
+    ax = axes[0]
+    sorted_b_traj = np.sort(sol.y[m:, :], axis=0)
+    alpha = min(0.4, 20.0 / m)
+    for j in range(m):
+        ax.plot(sol.t, sorted_b_traj[j], color='steelblue',
+                alpha=alpha, linewidth=0.4)
+    ax.set_xlabel('Time'); ax.set_ylabel('Bias value')
+    ax.set_title('Sorted Bias Trajectories'); ax.set_xlim([0, T])
 
-        ax = axes[1]
-        ax.plot(x_plot, f_star(x_plot), 'k--', lw=2, label=f'Target {target_label}')
-        ax.plot(x_plot, f_final, 'r-', lw=2, label='Network $f$')
-        # Show cluster centers as tick marks instead of all m bias dots
-        y0, y1  = ax.get_ylim()
-        tick_h  = (y1 - y0) * 0.06
-        ax.vlines(cluster_centers, -tick_h/2, tick_h/2,
-                  colors='steelblue', linewidths=2.5, zorder=5)
-        ax.set_xlabel('$x$'); ax.set_title('Final Fit vs Target')
-        ax.legend(fontsize=8); ax.set_xlim([-1, 1])
+    ax = axes[1]
+    ax.plot(x_plot, f_star(x_plot), 'k--', lw=2, label=f'Target {target_label}')
+    ax.plot(x_plot, f_final, 'r-', lw=2, label='Network $f$')
+    y0, y1 = ax.get_ylim()
+    tick_h = (y1 - y0) * 0.06
+    ax.vlines(cluster_centers, -tick_h/2, tick_h/2,
+              colors='steelblue', linewidths=2.5, zorder=5)
+    ax.set_xlabel('$x$'); ax.set_title('Final Fit vs Target')
+    ax.legend(fontsize=8); ax.set_xlim([-1, 1])
 
-        ax = axes[2]
-        ax.semilogy(t_sparse, losses_sparse, color='darkorange', lw=1.5)
-        ax.set_xlabel('Time'); ax.set_ylabel('MSE Loss')
-        ax.set_title(f'Loss (log)   final={final_loss:.2e}')
-        ax.set_xlim([0, T]); ax.grid(True, alpha=0.3)
+    ax = axes[2]
+    ax.semilogy(t_sparse, losses_sparse, color='darkorange', lw=1.5)
+    ax.set_xlabel('Time'); ax.set_ylabel('MSE Loss')
+    ax.set_title(f'Loss (log)   final={final_loss:.2e}')
+    ax.set_xlim([0, T]); ax.grid(True, alpha=0.3)
 
-        plt.tight_layout()
-        plt.savefig(f_traj, bbox_inches='tight')
-        plt.close()
+    plt.tight_layout()
+    plt.savefig(f_traj, bbox_inches='tight')
+    plt.close()
 
-    # ── Figure 2: clusters vs inflection points ────────────────────────────────
-    if not os.path.exists(f_clust):
-        x_fine = np.linspace(-1.0, 1.0, 2000)
-        fig, ax = plt.subplots(figsize=(10, 4))
-        fig.suptitle(
-            f'target={target_label},  m={m},  T={T}  '
-            f'|  clusters={n_clusters},  k={k_true}  '
-            f'(C=k: {n_clusters == k_true})', fontsize=11)
-        ax.plot(x_fine, f_star(x_fine), 'k-', lw=2, label=f'Target {target_label}')
-        ax.plot(x_plot, f_final, 'r-', lw=1.5, label='Final network')
-        for cx in cluster_centers:
-            ax.axvline(cx, color='steelblue', alpha=0.5, lw=0.7)
-        for ix in infl_x:
-            ax.axvline(ix, color='green', alpha=0.7, lw=1.2, linestyle='--')
-        from matplotlib.lines import Line2D
-        h, _ = ax.get_legend_handles_labels()
-        h += [
-            Line2D([0],[0], color='steelblue', lw=1.5,
-                   label=f'Bias clusters ({n_clusters})'),
-            Line2D([0],[0], color='green', lw=1.5, ls='--',
-                   label=f'Inflection pts k={k_true}'),
-        ]
-        ax.legend(handles=h, fontsize=9)
-        ax.set_xlabel('$x$')
-        ax.set_title('Cluster Locations vs Inflection Points')
-        plt.tight_layout()
-        plt.savefig(f_clust, bbox_inches='tight')
-        plt.close()
+    # ── Figure 2: clusters vs inflection points ───────────────────────────────
+    x_fine = np.linspace(-1.0, 1.0, 2000)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    fig.suptitle(
+        f'target={target_label},  m={m},  T={T}  '
+        f'|  clusters={n_clusters},  k={k_true}  '
+        f'(C=k: {n_clusters == k_true})', fontsize=11)
+    ax.plot(x_fine, f_star(x_fine), 'k-', lw=2, label=f'Target {target_label}')
+    ax.plot(x_plot, f_final, 'r-', lw=1.5, label='Final network')
+    for cx in cluster_centers:
+        ax.axvline(cx, color='steelblue', alpha=0.5, lw=0.7)
+    for ix in infl_x:
+        ax.axvline(ix, color='green', alpha=0.7, lw=1.2, linestyle='--')
+    from matplotlib.lines import Line2D
+    h, _ = ax.get_legend_handles_labels()
+    h += [
+        Line2D([0],[0], color='steelblue', lw=1.5,
+               label=f'Bias clusters ({n_clusters})'),
+        Line2D([0],[0], color='green', lw=1.5, ls='--',
+               label=f'Inflection pts k={k_true}'),
+    ]
+    ax.legend(handles=h, fontsize=9)
+    ax.set_xlabel('$x$')
+    ax.set_title('Cluster Locations vs Inflection Points')
+    plt.tight_layout()
+    plt.savefig(f_clust, bbox_inches='tight')
+    plt.close()
 
-    # ── Figure 3: ODE stationarity check ──────────────────────────────────────
-    if not os.path.exists(f_ode):
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-        fig.suptitle(
-            f'Stationarity — target={target_label},  m={m},  T={T}\n'
-            f'active={n_active},  k={k_true},  active<=k: {n_active<=k_true}',
-            fontsize=10)
+    # ── Figure 3: ODE stationarity check ─────────────────────────────────────
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    fig.suptitle(
+        f'Stationarity — target={target_label},  m={m},  T={T}\n'
+        f'active={n_active},  k={k_true},  active<=k: {n_active<=k_true}',
+        fontsize=10)
 
-        ax = axes[0]
-        ax.scatter(b_s, np.abs(da_s) + 1e-15, c=np.abs(a_s), cmap='viridis', s=10)
-        ax.set_xlabel('$b_j$'); ax.set_ylabel('$|\\dot{a}_j|$')
-        ax.set_title('Amplitude velocity  (should be $\\approx 0$)')
-        ax.set_yscale('log'); ax.grid(True, alpha=0.3)
+    ax = axes[0]
+    ax.scatter(b_s, np.abs(da_s) + 1e-15, c=np.abs(a_s), cmap='viridis', s=10)
+    ax.set_xlabel('$b_j$'); ax.set_ylabel('$|\\dot{a}_j|$')
+    ax.set_title('Amplitude velocity  ($\\approx 0$ at stationarity)')
+    ax.set_yscale('log'); ax.grid(True, alpha=0.3)
 
-        ax = axes[1]
-        ax.scatter(b_s, np.abs(db_s) + 1e-15, c=np.abs(a_s), cmap='viridis', s=10)
-        ax.set_xlabel('$b_j$'); ax.set_ylabel('$|\\dot{b}_j|$')
-        ax.set_title('Bias velocity  (should be $\\approx 0$)')
-        ax.set_yscale('log'); ax.grid(True, alpha=0.3)
+    ax = axes[1]
+    ax.scatter(b_s, np.abs(db_s) + 1e-15, c=np.abs(a_s), cmap='viridis', s=10)
+    ax.set_xlabel('$b_j$'); ax.set_ylabel('$|\\dot{b}_j|$')
+    ax.set_title('Bias velocity  ($\\approx 0$ at stationarity)')
+    ax.set_yscale('log'); ax.grid(True, alpha=0.3)
 
-        ax = axes[2]
-        sizes = np.clip(np.abs(a_s) / a_max * 80, 4, 80)
-        sc = ax.scatter(b_s, R_s, c=np.abs(a_s), cmap='viridis', s=sizes)
-        ax.scatter(b_s[active_s], R_s[active_s],
-                   edgecolors='red', facecolors='none', s=60, lw=1.2,
-                   label=f'Active ({n_active})')
-        ax.axhline(0.0, color='k', lw=1.0, linestyle='--')
-        plt.colorbar(sc, ax=ax, label='$|a_j|$')
-        ax.set_xlabel('$b_j$')
-        ax.set_ylabel('$R_j = \\int_{b_j}^{1}(f-f^*)\\,dx$')
-        ax.set_title(f'Integrated residual  active={n_active} <= k={k_true}: {n_active<=k_true}')
-        ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+    ax = axes[2]
+    sizes = np.clip(np.abs(a_s) / a_max * 80, 4, 80)
+    sc = ax.scatter(b_s, R_s, c=np.abs(a_s), cmap='viridis', s=sizes)
+    ax.scatter(b_s[active_s], R_s[active_s],
+               edgecolors='red', facecolors='none', s=60, lw=1.2,
+               label=f'Active ({n_active})')
+    ax.axhline(0.0, color='k', lw=1.0, linestyle='--')
+    plt.colorbar(sc, ax=ax, label='$|a_j|$')
+    ax.set_xlabel('$b_j$')
+    ax.set_ylabel('$R_j = \\int_{b_j}^{1}(f-f^*)\\,dx$')
+    ax.set_title(f'Integrated residual  active={n_active} <= k={k_true}: {n_active<=k_true}')
+    ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
-        plt.tight_layout()
-        plt.savefig(f_ode, bbox_inches='tight')
-        plt.close()
+    plt.tight_layout()
+    plt.savefig(f_ode, bbox_inches='tight')
+    plt.close()
 
-    # ── CSV: per-neuron stationarity data ─────────────────────────────────────
-    if not os.path.exists(f_csv):
-        R_tol = 1e-3
-        with open(f_csv, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(['neuron_idx', 'b_j', 'a_j',
-                             'da_dt', 'db_dt', 'R_j',
-                             'is_active', 'R_near_zero'])
-            for i in range(m):
-                writer.writerow([
-                    sort_idx[i],
-                    f'{b_s[i]:.6f}',  f'{a_s[i]:.6f}',
-                    f'{da_s[i]:.6e}', f'{db_s[i]:.6e}', f'{R_s[i]:.6e}',
-                    int(active_s[i]), int(abs(R_s[i]) < R_tol),
-                ])
+    # ── convergence_check.csv ─────────────────────────────────────────────────
+    R_tol = 1e-3
+    with open(f_csv, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['neuron_idx', 'b_j', 'a_j',
+                         'da_dt', 'db_dt', 'R_j', 'is_active', 'R_near_zero'])
+        for i in range(m):
+            writer.writerow([
+                sort_idx[i],
+                f'{b_s[i]:.6f}',  f'{a_s[i]:.6f}',
+                f'{da_s[i]:.6e}', f'{db_s[i]:.6e}', f'{R_s[i]:.6e}',
+                int(active_s[i]), int(abs(R_s[i]) < R_tol),
+            ])
 
-    # ── run_meta.csv: single-row summary for skip recovery ────────────────────
+    # ── run_meta.csv ──────────────────────────────────────────────────────────
     result = {
         'target': target_key, 'm': m, 'T': T,
-        'k_true': k_true, 'n_clusters': n_clusters,
-        'n_active': n_active, 'loss': final_loss,
-        'max_da': float(np.abs(da_final).max()),
-        'max_db': float(np.abs(db_final).max()),
+        'k_true':       k_true,
+        'n_clusters':   n_clusters,
+        'n_active':     n_active,
+        'loss':         final_loss,
+        'max_da':       float(np.abs(da_final).max()),
+        'max_db':       float(np.abs(db_final).max()),
         'active_leq_k': int(n_active <= k_true),
     }
     with open(f_meta, 'w', newline='') as mf:
@@ -395,15 +376,13 @@ def run_one(args):
     return result
 
 # =============================================================================
-# Convergence plot
+# Convergence plot  (single series per target — T is fixed)
 # =============================================================================
 
-def make_convergence_plot(summary_rows, out_path=None):
-    targets_present = list(dict.fromkeys(r['target'] for r in summary_rows))
-    T_present       = sorted(set(r['T'] for r in summary_rows))
-    markers         = ['o', 's', '^', 'D', 'v', 'P', 'X', 'h']
-    cmap            = plt.cm.tab10(np.linspace(0, 0.8, len(T_present)))
-
+def make_convergence_plot(summary_rows, out_path=CONV_PLOT):
+    targets_present = list(dict.fromkeys(
+        k for k in TARGETS if any(r['target'] == k for r in summary_rows)
+    ))
     n_t   = len(targets_present)
     ncols = 3
     nrows = -(-n_t // ncols)
@@ -413,38 +392,32 @@ def make_convergence_plot(summary_rows, out_path=None):
 
     for ax_i, tkey in enumerate(targets_present):
         ax     = axes_flat[ax_i]
-        rows_t = [r for r in summary_rows if r['target'] == tkey]
-        k_true = rows_t[0]['k_true']
-        label  = TARGETS[tkey][0] if tkey in TARGETS else tkey
-
-        for ti, T in enumerate(T_present):
-            rows_mT = sorted([r for r in rows_t if r['T'] == T],
-                             key=lambda r: r['m'])
-            if not rows_mT:
-                continue
-            ms = [r['m']         for r in rows_mT]
-            cs = [r['n_clusters'] for r in rows_mT]
-            ax.plot(ms, cs, marker=markers[ti % len(markers)],
-                    color=cmap[ti], lw=1.5, ms=5, label=f'T={T}')
-
+        k_true = TARGETS[tkey][1]
+        pts    = sorted([r for r in summary_rows if r['target'] == tkey],
+                        key=lambda r: r['m'])
+        if pts:
+            ms = [r['m']          for r in pts]
+            cs = [r['n_clusters'] for r in pts]
+            ax.plot(ms, cs, marker='o', color='steelblue',
+                    lw=1.5, ms=5, label=f'T={T_FINAL}')
         ax.axhline(k_true, color='crimson', lw=2, linestyle='--',
                    label=f'k={k_true}')
         ax.set_xlabel('Width $m$')
         ax.set_ylabel('Cluster count $C(m,f^*)$')
-        ax.set_title(label)
-        ax.legend(fontsize=7)
+        ax.set_title(TARGETS[tkey][0])
+        ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
     for ax_i in range(len(targets_present), len(axes_flat)):
         axes_flat[ax_i].set_visible(False)
 
     fig.suptitle(
-        'Open Problem 4.1 — $C(m,f^*) \\to k$ as $m \\to \\infty$\n'
-        'Crimson dashed = analytical inflection-point count $k$',
+        f'Open Problem 4.1 — $C(m,f^*) \\to k$ as $m \\to \\infty$'
+        f'  (ODE flow, T={T_FINAL})\n'
+        f'Crimson dashed = analytical inflection-point count $k$'
+        f'  |  {len(summary_rows)} completed runs',
         fontsize=13)
     plt.tight_layout()
-    if out_path is None:
-        out_path = os.path.join(FIG_BASE, 'convergence_plot_parallel.png')
     plt.savefig(out_path, bbox_inches='tight', dpi=130)
     plt.close()
     print(f'Convergence plot -> {out_path}')
@@ -456,7 +429,6 @@ def make_convergence_plot(summary_rows, out_path=None):
 if __name__ == '__main__':
     os.makedirs(FIG_BASE, exist_ok=True)
 
-    # ── Load simulate.py rows (read-only) for reference ──────────────────────
     def load_csv(path):
         rows = []
         if os.path.exists(path):
@@ -476,210 +448,71 @@ if __name__ == '__main__':
                     })
         return rows
 
-    orig_rows     = load_csv(ORIG_SUMMARY_CSV)   # simulate.py rows — never written to
-    existing_rows = load_csv(SUMMARY_CSV)        # previous parallel runs
+    existing_rows = load_csv(SUMMARY_CSV)
+    n_workers     = max(1, cpu_count() - 2)
 
-    n_workers = max(1, cpu_count() - 2)
-
-    # ── Helper: run a batch of jobs and return results + counts ───────────────
-    def run_phase(jobs_list, phase_label):
-        """Submit jobs_list to the pool and return (rows, n_skipped, n_completed)."""
-        phase_rows      = []
-        phase_skipped   = 0
-        phase_completed = 0
-        print(f'\n{"=" * 72}')
-        print(phase_label)
-        print(f'{"=" * 72}')
-        with Pool(processes=n_workers) as pool:
-            for result in pool.imap_unordered(run_one, jobs_list):
-                if result is None:
-                    phase_skipped += 1
-                    continue
-                was_skipped = result.pop('_skipped', False)
-                elapsed     = result.pop('_elapsed', None)
-                phase_rows.append(result)
-                tag = (f'{result["target"]:<12}  m={result["m"]:<5}  T={result["T"]:<6}  '
-                       f'clusters={result["n_clusters"]:<4}  k={result["k_true"]}  '
-                       f'C=k: {result["n_clusters"] == result["k_true"]}  '
-                       f'loss={result["loss"]:.3e}  '
-                       f'max|db|={result["max_db"]:.2e}')
-                if was_skipped:
-                    phase_skipped += 1
-                    print(f'  SKIP (meta)  {tag}')
-                else:
-                    phase_completed += 1
-                    t_str = f'  [{elapsed:.0f}s]' if elapsed else ''
-                    print(f'  DONE{t_str}  {tag}')
-        return phase_rows, phase_skipped, phase_completed
-
-    # ── Phase 1: base m sweep, sorted by (m, T, target) ──────────────────────
-    # All targets run at m=50 before any target runs at m=100, etc.
-    # Within the same m, T=5000 runs before T=10000.
-    # This guarantees data on every target even if the run is stopped early.
-    base_jobs = sorted(
-        [(t, m, T) for t in TARGETS for m in M_VALUES_ALL for T in T_VALUES_ALL],
-        key=lambda x: (x[1], x[2], x[0])   # (m, T, target_name)
+    jobs = sorted(
+        [(t, m) for t in TARGETS for m in M_VALUES],
+        key=lambda x: (x[1], x[0])   # all targets at m=50 before m=100, etc.
     )
 
     print('=' * 72)
-    print('simulate_parallel.py — Open Problem 4.1')
+    print('simulate_parallel.py — Open Problem 4.1  (ODE gradient flow)')
+    print(f'T_FINAL      : {T_FINAL}  (fixed — m is the sweep axis)')
+    print(f'M_VALUES     : {M_VALUES}')
     print(f'Targets      : {list(TARGETS.keys())}')
-    print(f'Base m       : {M_VALUES_ALL}')
-    print(f'Extended m   : {EXTENDED_M}  (Phase 2, non-converged targets only)')
-    print(f'T values     : {T_VALUES_ALL}')
-    print(f'Phase 1 jobs : {len(base_jobs)}')
+    print(f'Total jobs   : {len(jobs)}  ({len(TARGETS)} targets × {len(M_VALUES)} m values)')
     print(f'Workers      : {n_workers}  (of {cpu_count()} logical CPUs)')
-    print(f'simulate.py rows (plot only) : {len(orig_rows)}')
-    print(f'Previous parallel rows       : {len(existing_rows)}')
-    print(f'Summary  -> {SUMMARY_CSV}')
-    print(f'Plot     -> {CONV_PLOT}')
+    print(f'Previous rows: {len(existing_rows)}')
+    print(f'Summary  ->  {SUMMARY_CSV}')
+    print(f'Plot     ->  {CONV_PLOT}')
     print('=' * 72)
 
     t_start   = time.time()
-    all_new   = []   # accumulates results from both phases
+    all_new   = []
     skipped   = 0
     completed = 0
 
-    p1_rows, p1_skip, p1_done = run_phase(base_jobs, 'Phase 1 — base m sweep (all targets)')
-    all_new.extend(p1_rows)
-    skipped   += p1_skip
-    completed += p1_done
+    print(f'\n{"=" * 72}')
+    print('Running flat m sweep — all targets, all m values')
+    print(f'{"=" * 72}')
 
-    # ── Dynamic convergence check at max(M_VALUES_ALL) ────────────────────────
-    # A target is converged if n_clusters == k_true for at least one T value
-    # at the highest base m. Non-converged targets proceed to Phase 2.
-    MAX_BASE_M   = max(M_VALUES_ALL)
-    all_results  = {(r['target'], r['m'], r['T']): r for r in existing_rows}
+    with Pool(processes=n_workers) as pool:
+        for result in pool.imap_unordered(run_one, jobs):
+            if result is None:
+                skipped += 1
+                continue
+            was_skipped = result.pop('_skipped', False)
+            elapsed     = result.pop('_elapsed', None)
+            all_new.append(result)
+            tag = (f'{result["target"]:<12}  m={result["m"]:<5}  T={result["T"]:<5}  '
+                   f'clusters={result["n_clusters"]:<4}  k={result["k_true"]}  '
+                   f'C=k: {result["n_clusters"] == result["k_true"]}  '
+                   f'loss={result["loss"]:.3e}  '
+                   f'max|db|={result["max_db"]:.2e}')
+            if was_skipped:
+                skipped += 1
+                print(f'  SKIP (meta)  {tag}')
+            else:
+                completed += 1
+                t_str = f'  [{elapsed:.0f}s]' if elapsed else ''
+                print(f'  DONE{t_str}  {tag}')
+
+    # ── Write summary CSV ─────────────────────────────────────────────────────
+    merged = {(r['target'], r['m']): r for r in existing_rows}
     for r in all_new:
-        all_results[(r['target'], r['m'], r['T'])] = r
-
-    # ── Phase 1 → Phase 2 convergence check (|C-k| <= CONV_THRESHOLD) ──────────
-    non_converged = []
-    print(f'\n── Convergence check at m={MAX_BASE_M}  (threshold |C-k| <= {CONV_THRESHOLD}) {"─"*20}')
-    for t_key, (_, k_true, _) in TARGETS.items():
-        at_max_m = [v for (t, m, T), v in all_results.items()
-                    if t == t_key and m == MAX_BASE_M]
-        if not at_max_m:
-            print(f'  {t_key:<12}  k={k_true}  NO DATA — queuing Phase 2')
-            non_converged.append(t_key)
-        elif any(abs(r['n_clusters'] - k_true) <= CONV_THRESHOLD for r in at_max_m):
-            best = min(abs(r['n_clusters'] - k_true) for r in at_max_m)
-            print(f'  {t_key:<12}  k={k_true}  CONVERGED  (min |C-k| = {best})')
-        else:
-            diffs = [abs(r['n_clusters'] - k_true) for r in at_max_m]
-            print(f'  {t_key:<12}  k={k_true}  NOT CONVERGED  (min |C-k| = {min(diffs)}) — queuing Phase 2')
-            non_converged.append(t_key)
-
-    # ── Phase 2: loop with per-target early stopping ──────────────────────────
-    # Builds m sequence from PHASE2_M_FIXED then increments by PHASE2_M_INCREMENT
-    # up to PHASE2_M_MAX (hard stop). Each target exits after 2 consecutive
-    # m values both satisfying |C-k| <= CONV_THRESHOLD (filters transients).
-    if non_converged:
-        phase2_m_seq = list(PHASE2_M_FIXED)
-        _m = max(PHASE2_M_FIXED)
-        while _m < PHASE2_M_MAX:
-            _m = min(_m + PHASE2_M_INCREMENT, PHASE2_M_MAX)
-            if _m not in phase2_m_seq:
-                phase2_m_seq.append(_m)
-
-        print(f'\nPhase 2 targets      : {non_converged}')
-        print(f'Phase 2 m sequence   : {phase2_m_seq}')
-        print(f'Convergence rule     : |C-k| <= {CONV_THRESHOLD} for 2 consecutive m values')
-        print(f'Hard stop            : m = {PHASE2_M_MAX}')
-
-        remaining    = list(non_converged)
-        consec_hits  = {t: 0 for t in non_converged}  # consecutive hit counter per target
-
-        for m_val in phase2_m_seq:
-            if not remaining:
-                break
-
-            batch_jobs = sorted(
-                [(t, m_val, T) for t in remaining for T in T_VALUES_ALL],
-                key=lambda x: (x[1], x[2], x[0])
-            )
-            p2_rows, p2_skip, p2_done = run_phase(
-                batch_jobs,
-                f'Phase 2 — m={m_val}  ({len(remaining)} targets remaining)'
-            )
-            all_new.extend(p2_rows)
-            skipped   += p2_skip
-            completed += p2_done
-
-            # Update all_results with this batch
-            for r in p2_rows:
-                all_results[(r['target'], r['m'], r['T'])] = r
-
-            # Per-target convergence check — 2 consecutive hits required
-            still_remaining = []
-            print(f'\n── Phase 2 convergence check at m={m_val} {"─"*30}')
-            for t_key in remaining:
-                _, k_true, _ = TARGETS[t_key]
-                at_m = [v for (t, m, T), v in all_results.items()
-                        if t == t_key and m == m_val]
-                hit_this_m = (at_m and any(
-                    abs(r['n_clusters'] - k_true) <= CONV_THRESHOLD for r in at_m
-                ))
-
-                if hit_this_m:
-                    consec_hits[t_key] += 1
-                    best = min(abs(r['n_clusters'] - k_true) for r in at_m)
-                else:
-                    consec_hits[t_key] = 0   # reset — transient, not true convergence
-
-                hits = consec_hits[t_key]
-
-                if hits >= 2:
-                    print(f'  {t_key:<12}  k={k_true}  CONVERGED  '
-                          f'(|C-k| <= {CONV_THRESHOLD} for 2 consecutive m values) — done')
-                elif hits == 1:
-                    best = min(abs(r['n_clusters'] - k_true) for r in at_m)
-                    print(f'  {t_key:<12}  k={k_true}  1st hit at m={m_val}  '
-                          f'(|C-k| = {best}) — need 1 more consecutive')
-                    still_remaining.append(t_key)
-                else:
-                    diffs = ([abs(r['n_clusters'] - k_true) for r in at_m]
-                             if at_m else [])
-                    diff_str = str(min(diffs)) if diffs else 'no data'
-                    if m_val == PHASE2_M_MAX:
-                        print(f'  {t_key:<12}  k={k_true}  HARD STOP at m={PHASE2_M_MAX}  '
-                              f'(min |C-k| = {diff_str}) — not converged')
-                    else:
-                        print(f'  {t_key:<12}  k={k_true}  not converged  '
-                              f'(min |C-k| = {diff_str}) — continuing')
-                        still_remaining.append(t_key)
-
-            remaining = still_remaining
-
-        not_conv = [t for t in non_converged if consec_hits[t] < 2]
-        if not_conv:
-            print(f'\nPhase 2 complete (hard stop m={PHASE2_M_MAX}). '
-                  f'Did not converge: {not_conv}')
-        else:
-            print(f'\nAll Phase 2 targets confirmed converged (2 consecutive hits).')
-    else:
-        print('\nAll targets converged at base m — Phase 2 not needed.')
-
-    # ── Write run_summary_parallel.csv ────────────────────────────────────────
-    parallel_rows = {(r['target'], r['m'], r['T']): r for r in existing_rows}
-    for r in all_new:
-        parallel_rows[(r['target'], r['m'], r['T'])] = r
-    parallel_rows = sorted(parallel_rows.values(),
-                           key=lambda r: (r['target'], r['m'], r['T']))
+        merged[(r['target'], r['m'])] = r
+    final_rows = sorted(merged.values(), key=lambda r: (r['target'], r['m']))
 
     with open(SUMMARY_CSV, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=META_FIELDS)
         writer.writeheader()
-        for r in parallel_rows:
+        for r in final_rows:
             writer.writerow({k: r[k] for k in META_FIELDS})
-    print(f'\nParallel summary -> {SUMMARY_CSV}  ({len(parallel_rows)} rows)')
+    print(f'\nSummary -> {SUMMARY_CSV}  ({len(final_rows)} rows)')
 
-    # ── Convergence plot — high-T runs only (T=5000, 10000) ──────────────────
-    # Low-T data (simulate.py) excluded — insufficient for convergence conclusions.
-    # orig_rows kept in memory in case caller wants to re-enable combined plot.
-    combined = sorted(parallel_rows.values(), key=lambda r: (r['target'], r['m'], r['T']))
-    if combined:
-        make_convergence_plot(combined, out_path=CONV_PLOT)
+    if final_rows:
+        make_convergence_plot(final_rows)
 
     wall = time.time() - t_start
     print(f'\nDone.  {completed} new runs,  {skipped} skipped,  '

@@ -34,6 +34,8 @@ import os, csv
 # "discrete" → GD results    in figures/Discrete GD/
 # =============================================================================
 MODE = "discrete"
+# "flow"     → ODE results in figures/Replication data/
+# "discrete" → GD results  in figures/Discrete GD/
 
 if MODE == "flow":
     FIG_BASE   = os.path.join('figures', 'Replication data')

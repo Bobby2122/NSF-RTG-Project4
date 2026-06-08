@@ -7,50 +7,37 @@ Uses the same shallow ReLU network and target functions as simulate_parallel.py
 but replaces the ODE solver (RK45) with explicit gradient descent updates —
 the same approach used in the original slide code.
 
-Advantages over ODE approach
------------------------------
-  - Runs in minutes instead of days
-  - Directly matches the slide demonstration code
-  - Bias collapse is still clearly visible
+Learning rate scaling
+---------------------
+  LR_SCALE = False  →  constant lr = LR_BASE = 0.01 (slide code value).
+                        Works for m <= 250 but diverges at m >= 500.
+                        Output: figures/Discrete GD/
 
-Differences from ODE approach
--------------------------------
-  - Learning rate (lr) controls step size instead of adaptive RK45
-  - "steps" replaces "T" as the time parameter
-  - Discrete approximation of gradient flow, not exact continuous solution
+  LR_SCALE = True   →  lr = LR_BASE / sqrt(m / 50) so that lr = 0.01 at m=50
+                        and decreases as 1/sqrt(m) for larger m.
+                        Steps also scale: n_steps = min(N_STEPS_MAX,
+                          int(N_STEPS_BASE * sqrt(m / 50))) to maintain
+                        the same total gradient "work" across all m.
+                        Output: figures/Discrete GD Scaled/
 
 Network
 -------
   f(x) = sum_j a_j * relu(x - b_j),   x in [-1, 1]
 
-  Same parameterization as simulate.py / simulate_parallel.py.
-  Kink location = b_j directly.
-
 Two-phase execution
 -------------------
   Phase 1 : base m sweep [50, 100, 250, 500, 1000] for all targets.
-            Jobs ordered by (m, target) so every target has small-m data
-            even if interrupted early.
-  Phase 2 : targets that did not satisfy |C-k| <= CONV_THRESHOLD at m=1000
-            continue through [1500, 2500, 3000, ..., 5000].
-            Per-target early stop: 2 consecutive m values both converged.
-            Hard stop at m = PHASE2_M_MAX even if not converged.
+  Phase 2 : targets not converged at m=1000 extend through [1500, 2500, …, 5000].
 
 Output
 ------
-  Per run : figures/Discrete GD/{target}/m={m}/steps={steps}/
-              bias_trajectories.png       Bias paths + final fit + loss curve
+  Per run : {FIG_BASE}/{target}/m={m}/steps={n_steps}/
+              bias_trajectories.png
               clusters_vs_inflections.png
-              convergence_check.csv       Per-neuron b_j, a_j, gradients, active
-              run_meta.csv                Single-row summary for skip recovery
-  Global  : figures/Discrete GD/run_summary_discrete.csv
-            figures/Discrete GD/convergence_plot_discrete.png
-
-Does NOT touch figures/Replication data/ (ODE results).
-
-Usage
------
-    python simulate_discrete.py
+              convergence_check.csv
+              run_meta.csv
+  Global  : {FIG_BASE}/run_summary_discrete.csv
+            {FIG_BASE}/convergence_plot_discrete.png
 """
 
 import numpy as np
@@ -64,9 +51,12 @@ from multiprocessing import Pool, cpu_count
 # Hyperparameters
 # =============================================================================
 
-LR           = 0.01        # gradient descent learning rate (matches slide code)
-N_STEPS      = 50_000      # training iterations
-LOG_EVERY    = 1_000       # save bias snapshot and loss every this many steps
+LR_SCALE     = True         # True  → lr scales as 1/sqrt(m/50), stable at all m
+                             # False → constant lr = LR_BASE (slide code; diverges m>=500)
+LR_BASE      = 1e-3         # lr at m=50 when LR_SCALE=True; constant lr when LR_SCALE=False
+N_STEPS_BASE = 50_000       # steps at m=50 (LR_SCALE=True) or for all m (LR_SCALE=False)
+N_STEPS_MAX  = 200_000      # cap on step count (LR_SCALE=True only)
+LOG_EVERY    = 1_000        # log bias snapshot and loss every this many steps
 
 N_QUAD           = 400
 X_QUAD           = np.linspace(-1.0, 1.0, N_QUAD)
@@ -82,19 +72,19 @@ SEED             = 42
 M_VALUES_ALL       = [50, 100, 250, 500, 1000]  # Phase 1 base sweep
 PHASE2_M_FIXED     = [1500, 2500]               # Phase 2 always begins with these
 PHASE2_M_INCREMENT = 500                        # step size after 2500
-PHASE2_M_MAX       = 5000                       # hard cap — stops here unconditionally
+PHASE2_M_MAX       = 5000                       # hard cap
 CONV_THRESHOLD     = 1                          # |C - k| <= this counts as converged
 
 # =============================================================================
-# Output paths
+# Output paths  (depend on LR_SCALE)
 # =============================================================================
 
 FIG_BASE    = os.path.join('figures', 'Discrete GD')
 SUMMARY_CSV = os.path.join(FIG_BASE, 'run_summary_discrete.csv')
 CONV_PLOT   = os.path.join(FIG_BASE, 'convergence_plot_discrete.png')
 
-META_FIELDS = ['target', 'm', 'steps', 'k_true', 'n_clusters', 'n_active',
-               'loss', 'max_da_grad', 'max_db_grad', 'active_leq_k']
+META_FIELDS = ['target', 'm', 'steps', 'lr_eff', 'k_true', 'n_clusters',
+               'n_active', 'loss', 'max_da_grad', 'max_db_grad', 'active_leq_k']
 
 # =============================================================================
 # Target functions
@@ -138,7 +128,7 @@ INFLECTIONS = {
 }
 
 # =============================================================================
-# Math helpers  (module-level so workers can access after re-import on Windows)
+# Math helpers
 # =============================================================================
 
 def relu(z):
@@ -146,7 +136,6 @@ def relu(z):
 
 
 def count_clusters(biases, tol=CLUSTER_TOL):
-    """Return cluster count using the same method as simulate_parallel.py."""
     s = np.sort(biases)
     return 1 + int(np.sum(np.diff(s) > tol))
 
@@ -164,6 +153,22 @@ def get_cluster_centers(biases, tol=CLUSTER_TOL):
 
 
 # =============================================================================
+# Per-run lr / step count (called inside run_one so workers get same value)
+# =============================================================================
+
+def _lr_and_steps(m):
+    """Return (lr, n_steps) for a given m according to LR_SCALE setting."""
+    if LR_SCALE:
+        scale    = np.sqrt(float(m) / 50.0)           # = 1 at m=50
+        lr       = LR_BASE / scale                     # lr = 0.01 at m=50
+        n_steps  = min(N_STEPS_MAX, int(N_STEPS_BASE * scale))
+    else:
+        lr      = LR_BASE
+        n_steps = N_STEPS_BASE
+    return lr, n_steps
+
+
+# =============================================================================
 # Single-run worker  (module-level so multiprocessing can pickle on Windows)
 # =============================================================================
 
@@ -175,7 +180,11 @@ def run_one(args):
     target_key, m = args
     target_label, k_true, f_star_fn = TARGETS[target_key]
 
-    out_dir = os.path.join(FIG_BASE, target_key, f'm={m}', f'steps={N_STEPS}')
+    lr, n_steps = _lr_and_steps(m)
+    log_every   = LOG_EVERY
+    n_log       = n_steps // log_every + 1
+
+    out_dir = os.path.join(FIG_BASE, target_key, f'm={m}', f'steps={n_steps}')
     f_traj  = os.path.join(out_dir, 'bias_trajectories.png')
     f_clust = os.path.join(out_dir, 'clusters_vs_inflections.png')
     f_csv   = os.path.join(out_dir, 'convergence_check.csv')
@@ -188,7 +197,8 @@ def run_one(args):
         return {
             'target':       target_key,
             'm':            m,
-            'steps':        N_STEPS,
+            'steps':        n_steps,
+            'lr_eff':       lr,
             'k_true':       k_true,
             'n_clusters':   int(row['n_clusters']),
             'n_active':     int(row['n_active']),
@@ -208,13 +218,12 @@ def run_one(args):
     b      = np.sort(rng.uniform(-1.0, 1.0, m))
     f_star = f_star_fn(X_QUAD)
 
-    n_log    = N_STEPS // LOG_EVERY + 1
     b_log    = np.zeros((n_log, m))
     loss_log = []
     b_log[0] = np.sort(b.copy())
 
     # ── Gradient descent loop ─────────────────────────────────────────────────
-    for step in range(N_STEPS):
+    for step in range(n_steps):
         H        = relu(X_QUAD[:, None] - b[None, :])          # (N_QUAD, m)
         f        = H @ a                                         # (N_QUAD,)
         residual = f - f_star                                    # (N_QUAD,)
@@ -226,11 +235,11 @@ def run_one(args):
         # dL/db_j = -a_j * integral_{x > b_j} (f - f*) dx
         db_grad = -(a * ((X_QUAD[:, None] > b[None, :]).T @ residual * DX))
 
-        a -= LR * da_grad
-        b -= LR * db_grad
+        a -= lr * da_grad
+        b -= lr * db_grad
 
-        if (step + 1) % LOG_EVERY == 0:
-            idx        = (step + 1) // LOG_EVERY
+        if (step + 1) % log_every == 0:
+            idx        = (step + 1) // log_every
             b_log[idx] = np.sort(b.copy())
             loss_log.append(loss)
 
@@ -250,11 +259,13 @@ def run_one(args):
     active_leq_k    = int(n_active <= k_true)
     infl_x          = np.array(INFLECTIONS.get(target_key, []))
 
+    lr_str  = f'{lr:.5f}'
+    iters   = np.arange(n_log) * log_every
+
     # ── Figure 1: bias trajectories + final fit + loss ────────────────────────
-    iters = np.arange(n_log) * LOG_EVERY
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     fig.suptitle(
-        f'target={target_label},  m={m},  steps={N_STEPS}'
+        f'target={target_label},  m={m},  steps={n_steps},  lr={lr_str}'
         f'  |  clusters={n_clusters},  k={k_true}', fontsize=12)
 
     ax = axes[0]
@@ -264,7 +275,7 @@ def run_one(args):
     ax.set_xlabel('Iteration')
     ax.set_ylabel('$b_j$ (kink location)')
     ax.set_title('Sorted Bias Trajectories')
-    ax.set_xlim([0, N_STEPS])
+    ax.set_xlim([0, n_steps])
     ax.grid(True, alpha=0.2)
 
     ax = axes[1]
@@ -283,23 +294,23 @@ def run_one(args):
 
     ax = axes[2]
     if loss_log:
-        ax.semilogy(np.arange(1, len(loss_log) + 1) * LOG_EVERY, loss_log,
+        ax.semilogy(np.arange(1, len(loss_log) + 1) * log_every, loss_log,
                     color='darkorange', lw=1.5)
     ax.set_xlabel('Iteration')
     ax.set_ylabel('MSE Loss')
     ax.set_title(f'Loss (log)   final={final_loss:.2e}')
-    ax.set_xlim([0, N_STEPS])
+    ax.set_xlim([0, n_steps])
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(f_traj, bbox_inches='tight', dpi=130)
     plt.close()
 
-    # ── Figure 2: clusters vs inflection points ────────────────────────────────
+    # ── Figure 2: clusters vs inflection points ───────────────────────────────
     x_fine = np.linspace(-1.0, 1.0, 2000)
     fig, ax = plt.subplots(figsize=(10, 4))
     fig.suptitle(
-        f'target={target_label},  m={m},  steps={N_STEPS}  '
+        f'target={target_label},  m={m},  steps={n_steps},  lr={lr_str}  '
         f'|  clusters={n_clusters},  k={k_true}  '
         f'(C=k: {n_clusters == k_true})', fontsize=11)
     ax.plot(x_fine, f_star_fn(x_fine), 'k-', lw=2, label=f'Target {target_label}')
@@ -335,7 +346,8 @@ def run_one(args):
     result = {
         'target':       target_key,
         'm':            m,
-        'steps':        N_STEPS,
+        'steps':        n_steps,
+        'lr_eff':       lr,
         'k_true':       k_true,
         'n_clusters':   n_clusters,
         'n_active':     n_active,
@@ -377,7 +389,7 @@ def make_convergence_plot(rows, out_path=CONV_PLOT):
             ms = [r['m']          for r in pts]
             cs = [r['n_clusters'] for r in pts]
             ax.plot(ms, cs, marker='o', color='steelblue',
-                    lw=1.5, ms=5, label=f'steps={N_STEPS}')
+                    lw=1.5, ms=5, label='Discrete GD (scaled lr)')
         ax.axhline(k_true, color='crimson', lw=2, linestyle='--',
                    label=f'k = {k_true}')
         ax.set_xlabel('Width $m$', fontsize=10)
@@ -389,8 +401,10 @@ def make_convergence_plot(rows, out_path=CONV_PLOT):
     for ax_i in range(len(targets_present), len(axes_flat)):
         axes_flat[ax_i].set_visible(False)
 
+    lr_note = (f'lr = {LR_BASE}/√(m/50)  [= {LR_BASE} at m=50]'
+               if LR_SCALE else f'lr = {LR_BASE} (constant)')
     fig.suptitle(
-        f'Open Problem 4.1 — Discrete GD  (lr={LR},  steps={N_STEPS})\n'
+        f'Open Problem 4.1 — Discrete GD  ({lr_note})\n'
         f'Crimson dashed = analytical $k$   ({len(rows)} completed runs)',
         fontsize=13)
     plt.tight_layout()
@@ -413,6 +427,7 @@ def load_summary(path):
                 'target':       row['target'],
                 'm':            int(row['m']),
                 'steps':        int(row['steps']),
+                'lr_eff':       float(row.get('lr_eff', LR_BASE)),
                 'k_true':       int(row['k_true']),
                 'n_clusters':   int(row['n_clusters']),
                 'n_active':     int(row['n_active']),
@@ -447,15 +462,24 @@ if __name__ == '__main__':
         key=lambda x: (x[1], x[0])   # m first, then target name
     )
 
+    lr_note = (f'lr = {LR_BASE}/√(m/50)  [= {LR_BASE:.4g} at m=50, '
+               f'{LR_BASE/np.sqrt(1000/50):.4g} at m=1000]'
+               if LR_SCALE else f'lr = {LR_BASE} (constant)')
+
     print('=' * 72)
     print('simulate_discrete.py — Open Problem 4.1  (Discrete Gradient Descent)')
+    print(f'Mode         : {"SCALED lr (1/sqrt(m/50))" if LR_SCALE else "CONSTANT lr"}')
+    print(f'Learning rate: {lr_note}')
+    print(f'Steps        : {N_STEPS_BASE} at m=50'
+          + (f', up to {N_STEPS_MAX} (scales with sqrt(m/50))'
+             if LR_SCALE else ' (constant)'))
     print(f'Targets      : {list(TARGETS.keys())}')
     print(f'Base m       : {M_VALUES_ALL}')
-    print(f'Extended m   : {_phase2_m_seq}  (Phase 2, non-converged targets only)')
-    print(f'Steps        : {N_STEPS}   lr={LR}')
+    print(f'Extended m   : {_phase2_m_seq}  (Phase 2, non-converged only)')
     print(f'Phase 1 jobs : {len(base_jobs)}')
     print(f'Workers      : {n_workers}  (of {cpu_count()} logical CPUs)')
     print(f'Previous rows: {len(existing_rows)}')
+    print(f'Output dir   : {FIG_BASE}')
     print(f'Summary  ->  {SUMMARY_CSV}')
     print(f'Plot     ->  {CONV_PLOT}')
     print('=' * 72)
@@ -485,6 +509,8 @@ if __name__ == '__main__':
                        f'clusters={result["n_clusters"]:<4}  k={result["k_true"]}  '
                        f'C=k: {result["n_clusters"] == result["k_true"]}  '
                        f'loss={result["loss"]:.3e}  '
+                       f'lr={result["lr_eff"]:.5f}  '
+                       f'steps={result["steps"]}  '
                        f'max|db|={result["max_db_grad"]:.2e}')
                 if was_skipped:
                     phase_skipped += 1
@@ -575,13 +601,13 @@ if __name__ == '__main__':
                 if hit_this_m:
                     consec_hits[t_key] += 1
                 else:
-                    consec_hits[t_key] = 0   # reset — transient counts don't carry
+                    consec_hits[t_key] = 0
 
                 hits = consec_hits[t_key]
 
                 if hits >= 2:
                     print(f'  {t_key:<12}  k={k_true}  CONVERGED  '
-                          f'(|C-k| <= {CONV_THRESHOLD} for 2 consecutive m values) — done')
+                          f'(|C-k| <= {CONV_THRESHOLD} for 2 consecutive m) — done')
                 elif hits == 1:
                     best = min(abs(r['n_clusters'] - k_true) for r in at_m)
                     print(f'  {t_key:<12}  k={k_true}  1st hit at m={m_val}  '
@@ -619,7 +645,7 @@ if __name__ == '__main__':
         writer = csv.DictWriter(f, fieldnames=META_FIELDS)
         writer.writeheader()
         for r in final_rows:
-            writer.writerow({k: r[k] for k in META_FIELDS})
+            writer.writerow({k: r.get(k, '') for k in META_FIELDS})
     print(f'\nSummary -> {SUMMARY_CSV}  ({len(final_rows)} rows)')
 
     # ── Convergence plot ──────────────────────────────────────────────────────

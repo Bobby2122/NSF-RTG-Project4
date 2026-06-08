@@ -1,0 +1,2 @@
+target,m,steps,lr_eff,k_true,n_clusters,n_active,loss,max_da_grad,max_db_grad,active_leq_k
+poly_k3,1000,200000,0.00022360679774997895,3,8,857,0.00013840270613605946,0.0003176667693663984,0.0008308507743567597,0
